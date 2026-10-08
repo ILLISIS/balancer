@@ -6,10 +6,10 @@ import type { ControllerPluginContext } from "@clusterio/controller";
 import { lifecycle, rateLimited } from "universal_edges/runtime";
 import { setBalancerApi } from "./api.js";
 import {
-	DrainRequest, HostLeavingEvent, MoveRequest, PreflightRequest, StatusRequest, TelemetryEvent, type Check, type Move,
-	type Status,
+	BenchmarkRequest, DrainRequest, FactorioVersionEvent, HostBenchmarkRequest, HostLeavingEvent, MoveRequest,
+	PreflightRequest, StatusRequest, TelemetryEvent, type Check, type Move, type Status,
 } from "./contracts.js";
-import { applyCheck, decide, dueChecks, type Add, type View } from "./decider.js";
+import { applyCheck, benchmarksDue, decide, dueChecks, type Add, type View } from "./decider.js";
 import { RETRY_FAILED_MS, adoptOrphans, failovers, forget, goneHosts, wasRunningBefore } from "./failover.js";
 import { Mover, type MoverPort } from "./mover.js";
 import { openState } from "./state.js";
@@ -267,6 +267,135 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 		lifecycle(logger, "balancer.drain", request.on ? "on" : "off", { host: request.hostId });
 	});
 
+	/** §5.7: each host's newest Factorio, as it reported at its last connect (R8). */
+	const versions = new Map<number, string>();
+	/** Hosts whose benchmark failed this session: not run again automatically before they reconnect. */
+	const benchFailed = new Set<number>();
+	const referenceFile = path.join(dir, "balancer", "reference.zip");
+	/** R7: the reference a result was measured on; undefined until the default one is frozen. */
+	const referenceKey = (): string | undefined => {
+		const set = config.get("balancer.reference_save");
+		if (set) {
+			return `file:${path.resolve(set)}`;
+		}
+		return state.reference ? `tile:${state.reference.instanceId}` : undefined;
+	};
+	/**
+	 * P5, R7: balancer.reference_save, with no mods on the host's newest Factorio; unset, the busiest tile's copy (at
+	 * balancer.busy_tile_ms or more), with that tile's mod pack and Factorio version, frozen at its first need.
+	 * Undefined while there is none.
+	 */
+	const reference = async (): Promise<
+		{ file: string; modPack: lib.ModPack | null; version: string; key: string } | undefined
+	> => {
+		const set = config.get("balancer.reference_save");
+		if (set) {
+			return { file: path.resolve(set), modPack: null, version: "latest", key: `file:${path.resolve(set)}` };
+		}
+		if (!state.reference) {
+			const ms = (id: number) => telemetry.meanMs(id) ?? 0;
+			const [pick] = [...controller.instances.values()]
+				.filter(i => store.copy(i.id) !== undefined && ms(i.id) >= config.get("balancer.busy_tile_ms"))
+				.sort((a, b) => ms(b.id) - ms(a.id));
+			if (!pick) {
+				return undefined;
+			}
+			await fs.mkdir(path.dirname(referenceFile), { recursive: true });
+			await fs.copyFile(store.file(pick.id), referenceFile);
+			state.reference = {
+				instanceId: pick.id,
+				modPackId: pick.config.get("factorio.mod_pack_id") ?? config.get("controller.default_mod_pack_id"),
+				version: pick.config.get("factorio.version"),
+			};
+			await persist();
+			lifecycle(logger, "balancer.benchmark", "reference", { instance: pick.id, ms_per_tick: ms(pick.id) });
+		}
+		const { instanceId, modPackId, version } = state.reference;
+		const modPack = modPackId === null ? undefined : controller.modPacks.get(modPackId);
+		if (!modPack) {
+			throw new Error(`the reference's mod pack ${modPackId} no longer exists`);
+		}
+		return { file: referenceFile, modPack, version, key: `tile:${instanceId}` };
+	};
+	/**
+	 * §5.7: stream the reference to the host (per run) and run the join benchmark there; record its speed and slots.
+	 * "Benchmark now" (`operator`) also clears the host's learned slots (R10). A rejected or failed run leaves the host
+	 * unbenchmarked (§5.7) and is logged.
+	 */
+	const runBenchmark = async (hostId: number, operator: boolean) => {
+		benchmarking.add(hostId);
+		const started = Date.now();
+		try {
+			const ref = await reference();
+			if (!ref) {
+				throw new Error("no reference save yet");
+			}
+			lifecycle(logger, "balancer.benchmark", "started", { host: hostId, reference: ref.key, operator });
+			const stream = proxyStream(controller, { path: ref.file, size: (await fs.stat(ref.file)).size });
+			try {
+				const r = await controller.sendTo(
+					{ hostId }, new HostBenchmarkRequest(stream.id, ref.modPack, ref.version),
+				);
+				const host = state.hosts[hostId] ?? {};
+				const version = versions.get(hostId) ?? "unknown";
+				host.bench = { speed: r.speed, slots: r.slots, version, ref: ref.key, at: Date.now() };
+				if (operator) {
+					delete host.learned;
+				}
+				state.hosts[hostId] = host;
+				lifecycle(logger, "balancer.benchmark", "done", {
+					host: hostId, speed: r.speed, slots: r.slots, cores: r.cores, runs: r.runs,
+					wall_ms: Date.now() - started,
+				});
+			} finally {
+				stream.events.emit("close");
+			}
+		} catch (err: any) {
+			benchFailed.add(hostId);
+			delete state.hosts[hostId]?.bench;
+			lifecycle(logger, "balancer.benchmark", "failed", { host: hostId, error: err.message }, "warn");
+		} finally {
+			benchmarking.delete(hostId);
+			await persist();
+		}
+	};
+	/** §5.7, R3: each pass, the join benchmark starts on each quiet host whose result is missing or stale. */
+	const benchmarks = (v: View) => {
+		const key = referenceKey();
+		if (key === undefined) {
+			// Freezes the default reference once a tile is busy; the next pass benchmarks.
+			void reference().catch((err: Error) => {
+				logger.error(`balancer: freezing the reference save failed: ${err.message}`);
+			});
+			return;
+		}
+		const skip = (h: number) => benchmarking.has(h) || benchFailed.has(h);
+		for (const h of benchmarksDue(v, versions, state.hosts, key, skip)) {
+			void runBenchmark(h, false);
+		}
+	};
+
+	controller.handle(FactorioVersionEvent, async (event: FactorioVersionEvent, src: lib.Address) => {
+		versions.set(src.id, event.version);
+		benchFailed.delete(src.id); // a new session: a failed benchmark may run again
+	});
+
+	// §5.7's "benchmark now": it runs whatever the host carries (the operator chose), and answers once it has started.
+	controller.handle(BenchmarkRequest, async (request: BenchmarkRequest) => {
+		if (!port.hostConnected(request.hostId)) {
+			throw new lib.RequestError(`host ${request.hostId} is not connected`);
+		}
+		if (benchmarking.has(request.hostId)) {
+			throw new lib.RequestError(`host ${request.hostId} is running its benchmark already`);
+		}
+		if (!await reference()) {
+			throw new lib.RequestError(
+				"no reference save yet: set balancer.reference_save, or wait until a tile is busy",
+			);
+		}
+		void runBenchmark(request.hostId, true);
+	});
+
 	controller.handle(StatusRequest, async (): Promise<Status> => ({
 		hosts: [...controller.hosts.values()].map(h => ({
 			id: h.id,
@@ -409,6 +538,7 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 			const fields = { op: "balancer.overload", phase: "beyond", host: b.host, instance: b.instance };
 			warn(`beyond:${b.instance}`, "balancer.overload beyond: it lags as its host's only busy tile", fields);
 		}
+		benchmarks(v); // P4: the join benchmark runs whatever balancer.enabled says
 		moves.pump();
 	};
 	const timer = setInterval(pass, PASS_MS);

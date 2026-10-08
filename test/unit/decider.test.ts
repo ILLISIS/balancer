@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { Move } from "../../contracts.js";
 import {
-	applyCheck, decide, drainMoves, dueChecks, overloadMoves, recheckMoves, type Tile, type View,
+	applyCheck, benchmarksDue, decide, drainMoves, dueChecks, overloadMoves, recheckMoves, type Tile, type View,
 } from "../../decider.js";
 import { emptyState } from "../../state.js";
 import { Telemetry } from "../../telemetry.js";
@@ -184,4 +184,28 @@ test("a check whose window is gone stays unjudged (M2)", () => {
 	samples(v, 7, 60, 3);
 	v.moves.push(move({ endedAt: NOW - 15 * MIN - 1 }), move({ id: "edge", endedAt: NOW - 15 * MIN }));
 	assert.deepEqual(dueChecks(v).map(d => d.move.id), ["edge"], "past endedAt + checkMs + retention: skipped");
+});
+
+test("the join benchmark runs automatically only on a quiet host with no current result (R3, Review Focus 2)", () => {
+	const v = view({
+		connected: [1, 2, 3, 4, 5],
+		tiles: [
+			tile(10, 2), tile(20, 3, { status: "unknown" }), tile(30, 4, { status: "stopped" }),
+			tile(50, 5, { status: "stopped" }),
+		],
+		moves: [move({ instanceId: 50, from: 5, to: 1, step: "preflight" })],
+	});
+	const versions = new Map([1, 2, 3, 4, 5].map((h): [number, string] => [h, "2.1.21"]));
+	const hosts = { 4: { bench: { speed: 0.5, slots: 4, version: "2.1.21", ref: "tile:7", at: 0 } } };
+	assert.deepEqual(benchmarksDue(v, versions, hosts, "tile:7", () => false), [],
+		"1 and 5: a move; 2: a running tile; 3: an unknown one (a restart); 4: its result is current");
+	assert.deepEqual(benchmarksDue(v, versions, hosts, "file:/ref.zip", () => false), [4], "a new reference");
+	versions.set(4, "2.1.22");
+	assert.deepEqual(benchmarksDue(v, versions, hosts, "tile:7", () => false), [4], "a new Factorio");
+	v.moves = [];
+	assert.deepEqual(benchmarksDue(v, versions, hosts, "tile:7", h => h === 4), [1, 5], "skip: running or failed now");
+	versions.delete(1);
+	assert.deepEqual(benchmarksDue(v, versions, hosts, "tile:7", () => false), [4, 5], "1 hasn't reported a version");
+	v.draining = [5];
+	assert.deepEqual(benchmarksDue(v, versions, hosts, "tile:7", () => false), [4], "M5: a draining host waits");
 });

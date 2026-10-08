@@ -1,7 +1,7 @@
 import type { Check, Move } from "./contracts.js";
 import { RETRY_FAILED_MS } from "./failover.js";
 import { ended } from "./mover.js";
-import type { State } from "./state.js";
+import type { HostState, State } from "./state.js";
 import { KEEP_MS, type Telemetry } from "./telemetry.js";
 
 /** §5.5: at most one overload move per host in this long. */
@@ -191,4 +191,24 @@ export function recheckMoves(v: View): Add[] {
 		}
 	}
 	return add;
+}
+
+/**
+ * §5.7, R3: the hosts the join benchmark runs on automatically now: connected, their Factorio version reported, every
+ * instance on them stopped (none running, none unknown), no move from or to them, not draining (M5), not skipped
+ * (benchmarking, or failed this session), and no result yet or a stale one (another version or reference). A host with
+ * a running tile is never benchmarked automatically: its players would lag for two minutes.
+ */
+export function benchmarksDue(
+	v: View, versions: Map<number, string>, hosts: Record<string, HostState>, ref: string,
+	skip: (hostId: number) => boolean,
+): number[] {
+	return v.connected.filter(h => {
+		const version = versions.get(h);
+		const bench = hosts[h]?.bench;
+		return version !== undefined && !skip(h) && !v.draining.includes(h)
+			&& v.tiles.every(t => t.host !== h || t.status === "stopped")
+			&& !v.moves.some(m => !ended(m) && (m.from === h || m.to === h))
+			&& (bench === undefined || bench.version !== version || bench.ref !== ref);
+	});
 }

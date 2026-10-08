@@ -1,5 +1,5 @@
 import * as lib from "@clusterio/lib";
-import { DrainRequest, MoveRequest, StatusRequest, type Status } from "./contracts.js";
+import { BenchmarkRequest, DrainRequest, MoveRequest, StatusRequest, type Status } from "./contracts.js";
 
 /** The parts of clusterioctl's plugin context this entrypoint uses (CtlPluginContext lives in @clusterio/ctl). */
 type CtlContext = { hooks: { addCommands: lib.AsyncHook<[lib.CommandTree]> }; plugin: { name: string } };
@@ -97,7 +97,19 @@ balancerCommands.add(new lib.Command({
 	},
 }));
 
-/** clusterioctl entrypoint: `clusterioctl balancer status|move|drain`. */
+balancerCommands.add(new lib.Command({
+	definition: ["benchmark <host>", "Run the join benchmark on a host now: about 2 minutes, its tiles slow meanwhile",
+		yargs => {
+			yargs.positional("host", { describe: "Host name or id", type: "string" });
+		}],
+	handler: async (args: { host: string }, control: lib.Link) => {
+		const hostId = await lib.resolveHost(control, args.host);
+		await control.send(new BenchmarkRequest(hostId));
+		out(`benchmark started on host ${hostId}; logs: ./dev logs --grep balancer.benchmark`);
+	},
+}));
+
+/** clusterioctl entrypoint: `clusterioctl balancer status|move|drain|benchmark`. */
 export default async function loadCtlPlugin(context: CtlContext) {
 	context.hooks.addCommands.attach(context.plugin.name, async rootCommand => {
 		rootCommand.add(balancerCommands);
