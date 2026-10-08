@@ -17,6 +17,7 @@ test("balancer status prints a line per instance, then one per move", () => {
 			id: "7-1", instanceId: 7, from: 1, to: 2, reason: "manual", pinned: true, step: "failed", wasRunning: true,
 			tried: [2], failures: 0, back: false, save: null, tick: null, startedAt: 1, endedAt: 2,
 			error: "pre-flight failed on host 2",
+			preflight: null, check: null,
 		}],
 	};
 	assert.deepEqual(statusText(s, now), [
@@ -31,6 +32,7 @@ test("C13: a move that came back to its source shows as returned", () => {
 		id: "7-1", instanceId: 7, from: 1, to: 1, reason: "manual" as const, pinned: false, step: "done" as const,
 		wasRunning: true, tried: [2], failures: 3, back: true, save: null, tick: null, startedAt: 1, endedAt: 2,
 		error: "push failed",
+		preflight: null, check: null,
 	};
 	assert.deepEqual(statusText({ hosts: [], tiles: [], moves: [move, { ...move, step: "failed" }] }), [
 		"move 7-1 manual instance 7 1 -> 1 done returned: push failed",

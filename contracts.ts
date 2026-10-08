@@ -19,7 +19,10 @@ export const MoveSchema = Type.Object({
 	from: nullable(Type.Integer()),
 	/** The target being pre-flighted or moved to; null while none is chosen. */
 	to: nullable(Type.Integer()),
-	reason: Type.Union([Type.Literal("manual"), Type.Literal("failover")]),
+	reason: Type.Union([
+		Type.Literal("manual"), Type.Literal("failover"), Type.Literal("drain"), Type.Literal("overload"),
+		Type.Literal("after_check"),
+	]),
 	/** The operator named the target: no other host is tried (plan ruling 11). */
 	pinned: Type.Boolean(),
 	step: Type.Union([
@@ -42,9 +45,25 @@ export const MoveSchema = Type.Object({
 	startedAt: Type.Number(),
 	endedAt: nullable(Type.Number()),
 	error: nullable(Type.String()),
+	/**
+	 * The last pre-flight's verdict (the ledger, §4.3 unit 4): T's ms per tick there, the target's lowest UPS, and its
+	 * busy tiles then, which a failed after-check makes the target's slots (§5.6).
+	 */
+	preflight: nullable(Type.Object({
+		msPerTick: nullable(Type.Number()), minUps: nullable(Type.Number()), busy: Type.Integer(),
+	})),
+	/**
+	 * The after-check (§5.6, R9): T's mean UPS and ms per tick on the target, the lowest UPS of the target's other
+	 * tiles, and the verdict; ok is null when it couldn't be judged.
+	 */
+	check: nullable(Type.Object({
+		at: Type.Number(), ups: nullable(Type.Number()), ms: nullable(Type.Number()),
+		othersMinUps: nullable(Type.Number()), ok: nullable(Type.Boolean()),
+	})),
 });
 export type Move = Static<typeof MoveSchema>;
 export type Step = Move["step"];
+export type Check = NonNullable<Move["check"]>;
 
 /** What `clusterioctl balancer status` and the page show (§11's minimal page). */
 export const StatusSchema = Type.Object({
@@ -171,5 +190,90 @@ export class HostLeavingEvent {
 
 	static fromJSON(json: Static<typeof HostLeavingEvent.jsonSchema>) {
 		return new this(json.running);
+	}
+}
+
+/** Host → controller at each connect (R8): its newest Factorio; the join benchmark re-runs when it changes (§5.7). */
+export class FactorioVersionEvent {
+	declare ["constructor"]: typeof FactorioVersionEvent;
+	static type = "event" as const;
+	static src = "host" as const;
+	static dst = "controller" as const;
+	static plugin = "balancer" as const;
+
+	constructor(public version: string) { }
+
+	static jsonSchema = Type.Object({ version: Type.String() });
+
+	static fromJSON(json: Static<typeof FactorioVersionEvent.jsonSchema>) {
+		return new this(json.version);
+	}
+}
+
+/**
+ * Controller → host (§5.7): download the stream's reference save and run the join benchmark on it with `modPack` (null:
+ * no mods, P5) on Factorio `factorioVersion`. Answers the speed, the slots, the cores and each count's ms per tick.
+ */
+export class HostBenchmarkRequest {
+	declare ["constructor"]: typeof HostBenchmarkRequest;
+	static type = "request" as const;
+	static src = "controller" as const;
+	static dst = "host" as const;
+	static plugin = "balancer" as const;
+
+	constructor(public streamId: string, public modPack: lib.ModPack | null, public factorioVersion: string) { }
+
+	static jsonSchema = Type.Object({
+		streamId: Type.String(),
+		modPack: nullable(lib.ModPack.jsonSchema),
+		factorioVersion: Type.String(),
+	});
+
+	static fromJSON(json: Static<typeof HostBenchmarkRequest.jsonSchema>) {
+		const modPack = json.modPack === null ? null : lib.ModPack.fromJSON(json.modPack);
+		return new this(json.streamId, modPack, json.factorioVersion);
+	}
+
+	static Response = lib.plainJson(Type.Object({
+		speed: Type.Number(),
+		slots: Type.Integer(),
+		cores: Type.Integer(),
+		runs: Type.Array(Type.Object({ copies: Type.Integer(), msPerTick: Type.Number() })),
+	}));
+}
+
+/** Control → controller (§5.4): start or stop draining a host. Drain runs whatever balancer.enabled says (P4). */
+export class DrainRequest {
+	declare ["constructor"]: typeof DrainRequest;
+	static type = "request" as const;
+	static src = "control" as const;
+	static dst = "controller" as const;
+	static plugin = "balancer" as const;
+	static permission = "balancer.move" as const;
+
+	constructor(public hostId: number, public on: boolean) { }
+
+	static jsonSchema = Type.Object({ hostId: Type.Integer(), on: Type.Boolean() });
+
+	static fromJSON(json: Static<typeof DrainRequest.jsonSchema>) {
+		return new this(json.hostId, json.on);
+	}
+}
+
+/** Control → controller (§5.7): "benchmark now" on a host. */
+export class BenchmarkRequest {
+	declare ["constructor"]: typeof BenchmarkRequest;
+	static type = "request" as const;
+	static src = "control" as const;
+	static dst = "controller" as const;
+	static plugin = "balancer" as const;
+	static permission = "balancer.move" as const;
+
+	constructor(public hostId: number) { }
+
+	static jsonSchema = Type.Object({ hostId: Type.Integer() });
+
+	static fromJSON(json: Static<typeof BenchmarkRequest.jsonSchema>) {
+		return new this(json.hostId);
 	}
 }

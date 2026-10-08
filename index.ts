@@ -1,15 +1,21 @@
 import type * as lib from "@clusterio/lib";
-import { HostLeavingEvent, MoveRequest, PreflightRequest, StatusRequest, TelemetryEvent } from "./contracts.js";
+import {
+	BenchmarkRequest, DrainRequest, FactorioVersionEvent, HostBenchmarkRequest, HostLeavingEvent, MoveRequest,
+	PreflightRequest, StatusRequest, TelemetryEvent,
+} from "./contracts.js";
 
 declare module "@clusterio/lib" {
 	export interface ControllerConfigFields {
 		"balancer.enabled": boolean;
 		"balancer.failover_grace_minutes": number;
 		"balancer.ups_floor": number;
+		"balancer.lag_minutes": number;
 		"balancer.busy_tile_ms": number;
 		"balancer.preflight_max_ms": number;
+		"balancer.after_check_minutes": number;
 		"balancer.max_concurrent_moves": number;
 		"balancer.bad_pair_hours": number;
+		"balancer.reference_save": string | null;
 	}
 	export interface HostConfigFields {
 		"balancer.fence_minutes": number;
@@ -39,7 +45,9 @@ export const plugin: lib.PluginDeclaration = {
 	controllerConfigFields: {
 		"balancer.enabled": {
 			title: "Enabled",
-			description: "Automatic actions (phase 1: failover). Manual moves and save copies run either way.",
+			description: "The automatic rules: failover, overload and the after-check's re-move. Drain, manual " +
+				"moves, the join benchmark and save copies run either way. After-checks are still judged and " +
+				"recorded.",
 			type: "boolean",
 			initialValue: true,
 		},
@@ -57,8 +65,26 @@ export const plugin: lib.PluginDeclaration = {
 		),
 		"balancer.max_concurrent_moves": number("Concurrent moves", "Moves in progress at once in the cluster.", 3),
 		"balancer.bad_pair_hours": number(
-			"Bad pair hours", "Hours a tile isn't offered again to a host whose pre-flight it failed.", 24,
+			"Bad pair hours", "Hours a tile isn't offered again to a host after a failed pre-flight or after-check.",
+			24,
 		),
+		"balancer.lag_minutes": number(
+			"Lag minutes",
+			"A tile under the UPS floor this long overloads its host (§5.5). Values above 4 act as 4: the " +
+			"controller keeps 5 minutes of samples.",
+			3,
+		),
+		"balancer.after_check_minutes": number(
+			"After-check", "Minutes after a move until it is judged on its target, by its last 5 minutes (§5.6).", 10,
+		),
+		"balancer.reference_save": {
+			title: "Reference save",
+			description: "A vanilla save on the controller (a path) the join benchmark runs with no mods (§5.7). " +
+				"Empty: a copy of the busiest tile, with its mod pack. A new path benchmarks quiet hosts again " +
+				"(hosts with nothing running); the others on \"benchmark now\".",
+			type: "string",
+			optional: true,
+		},
 	},
 	hostConfigFields: {
 		"balancer.fence_minutes": number(
@@ -68,7 +94,10 @@ export const plugin: lib.PluginDeclaration = {
 			12,
 		),
 	},
-	messages: [HostLeavingEvent, TelemetryEvent, PreflightRequest, MoveRequest, StatusRequest],
+	messages: [
+		HostLeavingEvent, TelemetryEvent, PreflightRequest, MoveRequest, StatusRequest, FactorioVersionEvent,
+		HostBenchmarkRequest, DrainRequest, BenchmarkRequest,
+	],
 	permissions: [
 		{
 			name: "balancer.view",
@@ -79,7 +108,7 @@ export const plugin: lib.PluginDeclaration = {
 		{
 			name: "balancer.move",
 			title: "Move tiles",
-			description: "Move a tile to another host with its save.",
+			description: "Move tiles, drain hosts and run the join benchmark.",
 		},
 	],
 };

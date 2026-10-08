@@ -3,6 +3,8 @@
 export interface BalancerApi {
 	/** A move of this instance is queued or in progress: gridworld neither starts, stops nor assigns it (§8). */
 	moving(instanceId: number): boolean;
+	/** The host is draining (§5.4): gridworld's round-robin skips it (§8). */
+	draining(hostId: number): boolean;
 	/** Runs after each move ends, done or failed; returns the unsubscribe. */
 	onMoveFinished(listener: (instanceId: number) => void): () => void;
 }

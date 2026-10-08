@@ -235,6 +235,7 @@ test("a controller restart resumes from the persisted step (§5.2, Review Focus 
 	f.moves.push({
 		id: "7-1", instanceId: 7, from: 1, to: 2, reason: "manual", pinned: false, step: "push", wasRunning: true,
 		tried: [2], failures: 0, back: false, save: "world.zip", tick: 100, startedAt: 1, endedAt: null, error: null,
+		preflight: null, check: null,
 	});
 	assert.equal(f.mover.moving(7), true, "moving from the start, before resume()");
 	f.mover.resume();
@@ -345,6 +346,7 @@ test("a restart resumed at the start step with T already running only reads the 
 	f.moves.push({
 		id: "7-1", instanceId: 7, from: 1, to: 2, reason: "manual", pinned: false, step: "start", wasRunning: true,
 		tried: [2], failures: 0, back: false, save: "balancer.zip", tick: 100, startedAt: 1, endedAt: null, error: null,
+		preflight: null, check: null,
 	});
 	f.mover.resume();
 	await settle();
@@ -365,6 +367,7 @@ test("a stop that throws while T still runs ends the move failed with no restart
 const assignMove = (): Move => ({
 	id: "7-1", instanceId: 7, from: 1, to: 2, reason: "manual", pinned: false, step: "assign", wasRunning: true,
 	tried: [2], failures: 0, back: false, save: "world.zip", tick: 100, startedAt: 1, endedAt: null, error: null,
+	preflight: null, check: null,
 });
 
 test("a resumed move waits for the host its step talks to, and runs once it connects (C43)", async () => {

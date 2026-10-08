@@ -31,9 +31,12 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 	const { controller, logger, plugin } = context;
 	// §4.5: set before the first await, so gridworld's first pass can find it; it answers once the moves are loaded.
 	let mover: Mover | undefined;
+	/** state.draining once loaded; the drain handler edits that array in place. */
+	let draining: number[] = [];
 	const listeners = new Set<(instanceId: number) => void>();
 	setBalancerApi({
 		moving: id => mover?.moving(id) ?? false,
+		draining: id => draining.includes(id),
 		onMoveFinished: listener => {
 			listeners.add(listener);
 			return () => {
@@ -45,6 +48,7 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 	const config = controller.config;
 	const dir = path.resolve(config.get("controller.database_directory"));
 	const { state, save } = await openState(dir);
+	draining = state.draining;
 	const persist = () => save().catch((err: Error) => {
 		logger.error(`balancer: writing balancer.json failed: ${err.message}`);
 	});

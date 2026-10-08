@@ -88,6 +88,8 @@ export class Mover {
 			startedAt: now,
 			endedAt: null,
 			error: null,
+			preflight: null,
+			check: null,
 		};
 		this.moves.push(m);
 		void this.port.save();
