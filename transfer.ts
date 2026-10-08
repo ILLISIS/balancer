@@ -46,6 +46,21 @@ export function proxyStream(controller: Controller, file?: { path: string; size:
 	return stream;
 }
 
+/** Rejects unless the file's tail holds a zip End-Of-Central-Directory record: a short upload isn't a save. */
+async function requireZip(tmp: string, file: string): Promise<void> {
+	const fh = await fs.open(tmp, "r");
+	try {
+		const { size } = await fh.stat();
+		const len = Math.min(size, 65557); // the EOCD record (22 bytes) plus a comment of up to 65535
+		const { buffer } = await fh.read(Buffer.alloc(len), 0, len, size - len);
+		if (!buffer.includes(Buffer.from([0x50, 0x4b, 0x05, 0x06]))) {
+			throw new Error(`incomplete save: ${path.basename(file)}`);
+		}
+	} finally {
+		await fh.close();
+	}
+}
+
 /**
  * Writes `source` to `file` through a temporary file, renamed only once the source has ended. A source destroyed first
  * rejects and leaves `file` as it was: Node's 300 s requestTimeout cuts a slow host's upload that way (spike 32).
@@ -56,6 +71,7 @@ export async function receive(source: Readable, file: string): Promise<void> {
 	const fh = await fs.open(tmp, "w");
 	try {
 		await pipeline(source, fh.createWriteStream());
+		await requireZip(tmp, file);
 		await fs.rename(tmp, file);
 	} catch (err) {
 		await fs.rm(tmp, { force: true }); // after the pipeline has settled, so the write stream can't recreate tmp

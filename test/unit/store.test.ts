@@ -88,3 +88,13 @@ test("pulls of one instance run in order: the mover's pull after a queued one en
 	assert.equal(state.copies[7].name, "world.zip");
 	assert.equal(state.copies[7].mtimeMs, 5000, "a pull with no mtime is stamped now");
 });
+
+test("a save being pulled is not queued again by a repeat listing", async () => {
+	const { store, pulls } = fakeStore();
+	store.updated([save(7, "a.zip", 100)]);
+	await settle();
+	store.updated([save(7, "a.zip", 100)]);
+	pulls[0].resolve();
+	await settle();
+	assert.equal(pulls.length, 1);
+});

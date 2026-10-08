@@ -27,6 +27,7 @@ export function copyable(s: lib.SaveDetails): boolean {
 export class SaveStore {
 	private waiting = new Map<number, lib.SaveDetails>();
 	private running = 0;
+	private inflight = new Map<number, number>();
 	private chains = new Map<number, Promise<void>>();
 
 	constructor(private state: State, private dir: string, private port: StorePort, private max = 3) { }
@@ -42,7 +43,11 @@ export class SaveStore {
 	/** controller.saves' "update", and the saves listed at start: queue each newer one, then pump. */
 	updated(saves: lib.SaveDetails[]): void {
 		for (const s of saves.filter(copyable)) {
-			const have = Math.max(this.copy(s.instanceId)?.mtimeMs ?? 0, this.waiting.get(s.instanceId)?.mtimeMs ?? 0);
+			const have = Math.max(
+				this.copy(s.instanceId)?.mtimeMs ?? 0,
+				this.waiting.get(s.instanceId)?.mtimeMs ?? 0,
+				this.inflight.get(s.instanceId) ?? 0,
+			);
 			if (s.mtimeMs > have) {
 				this.waiting.set(s.instanceId, s);
 			}
@@ -70,7 +75,10 @@ export class SaveStore {
 			}
 			this.waiting.delete(instanceId);
 			this.running += 1;
-			this.pull(instanceId, s.name, s.mtimeMs, s.size).catch((err: Error) => {
+			this.inflight.set(instanceId, s.mtimeMs);
+			this.pull(instanceId, s.name, s.mtimeMs, s.size).finally(() => {
+				this.inflight.delete(instanceId);
+			}).catch((err: Error) => {
 				this.port.log("pull_failed", { instance: instanceId, save: s.name, error: err.message }, "warn");
 			}).finally(() => {
 				this.running -= 1;
