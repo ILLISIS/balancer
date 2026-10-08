@@ -64,7 +64,7 @@ export const StatusSchema = Type.Object({
 		ups: nullable(Type.Number()),
 		ms: nullable(Type.Number()),
 		players: Type.Integer(),
-		/** The stored copy's save time on its host; null without a copy. */
+		/** The copy's save time on its host (its pull time until the new host saves); null without a copy. */
 		copyMtimeMs: nullable(Type.Number()),
 	})),
 	moves: Type.Array(MoveSchema),
