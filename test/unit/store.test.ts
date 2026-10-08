@@ -9,8 +9,8 @@ import { settle } from "./helpers.js";
 type Pending = { id: number; name: string; resolve(): void; reject(err: Error): void };
 type Line = { phase: string; fields: Record<string, unknown>; level?: string };
 
-/** A store whose pulls wait until the test resolves or rejects them. */
-function fakeStore(max = 3) {
+/** A store whose pulls wait until the test settles them. Instances are on host 1 unless `hostOf` says. */
+function fakeStore(hostOf: (instanceId: number) => number | null = () => 1) {
 	const state = emptyState();
 	const pulls: Pending[] = [];
 	const lines: Line[] = [];
@@ -18,12 +18,13 @@ function fakeStore(max = 3) {
 		pull: (id, name) => new Promise<void>((resolve, reject) => {
 			pulls.push({ id, name, resolve, reject });
 		}),
+		host: hostOf,
 		save: async () => undefined,
 		log: (phase, fields, level) => {
 			lines.push({ phase, fields, level });
 		},
 		now: () => 5000,
-	}, max);
+	});
 	return { state, store, pulls, lines };
 }
 
@@ -50,14 +51,23 @@ test("each instance's newest copyable save is pulled once it is newer than the c
 	assert.deepEqual(lines.map(l => l.phase), ["pulled"]);
 });
 
-test("at most 3 pulls run at once (§4.3); the next starts when one ends", async () => {
-	const { store, pulls } = fakeStore();
-	store.updated([1, 2, 3, 4].map(id => save(id, "a.zip", 10)));
+test("each host uploads one queued save at a time; other hosts' run alongside (P2, Review Focus 4)", async () => {
+	const { store, pulls } = fakeStore(id => (id < 3 ? 1 : 2));
+	store.updated([1, 2, 3].map(id => save(id, "a.zip", 10)));
 	await settle();
-	assert.deepEqual(pulls.map(p => p.id), [1, 2, 3]);
+	assert.deepEqual(pulls.map(p => p.id), [1, 3], "one from host 1, one from host 2");
 	pulls[0].resolve();
 	await settle();
-	assert.deepEqual(pulls.map(p => p.id), [1, 2, 3, 4]);
+	assert.deepEqual(pulls.map(p => p.id), [1, 3, 2]);
+});
+
+test("the mover's own pull doesn't wait for its host's queued upload (P2)", async () => {
+	const { store, pulls } = fakeStore();
+	store.updated([save(8, "a.zip", 10)]);
+	await settle();
+	void store.pull(7, "stopped.zip");
+	await settle();
+	assert.deepEqual(pulls.map(p => p.name), ["a.zip", "stopped.zip"]);
 });
 
 test("a failed pull keeps the previous copy and logs a warning (§5.1)", async () => {
@@ -100,7 +110,7 @@ test("a save being pulled is not queued again by a repeat listing", async () => 
 });
 
 test("a direct pull drops the older save queued for the same instance (C24)", async () => {
-	const { store, pulls } = fakeStore(1);
+	const { store, pulls } = fakeStore();
 	store.updated([save(8, "a.zip", 100), save(7, "_autosave1.zip", 100)]);
 	await settle();
 	assert.deepEqual(pulls.map(p => p.id), [8]);
@@ -113,7 +123,7 @@ test("a direct pull drops the older save queued for the same instance (C24)", as
 });
 
 test("a direct pull drops the older queued save at once, though that instance is pulling (C24a)", async () => {
-	const { state, store, pulls } = fakeStore(2);
+	const { state, store, pulls } = fakeStore(id => id);
 	store.updated([save(7, "A1.zip", 100), save(8, "b.zip", 100)]);
 	await settle();
 	store.updated([save(7, "A2.zip", 200)]);
@@ -129,7 +139,7 @@ test("a direct pull drops the older queued save at once, though that instance is
 });
 
 test("a pump pull behind an earlier one keeps a newer queued save (C24b)", async () => {
-	const { state, store, pulls } = fakeStore(2);
+	const { state, store, pulls } = fakeStore();
 	store.updated([save(7, "A0.zip", 100)]);
 	await settle();
 	store.updated([save(7, "A1.zip", 200)]);
@@ -142,7 +152,7 @@ test("a pump pull behind an earlier one keeps a newer queued save (C24b)", async
 });
 
 test("a deleted save drops the queued entry of the same name (C48)", async () => {
-	const { store, pulls } = fakeStore(1);
+	const { store, pulls } = fakeStore();
 	store.updated([save(8, "a.zip", 100), save(7, "A.zip", 100)]);
 	await settle();
 	store.updated([save(7, "A.zip", 100, { isDeleted: true })]);
@@ -164,7 +174,7 @@ test("a changed host zeroes the copy's mtime, so the next save there is pulled (
 });
 
 test("drop removes the copy and its queued save (C45)", async () => {
-	const { state, store } = fakeStore(0);
+	const { state, store } = fakeStore();
 	state.copies[7] = { name: "old.zip", mtimeMs: 1, size: 1, pulledAt: 1 };
 	await store.drop(7);
 	assert.equal(store.copy(7), undefined);

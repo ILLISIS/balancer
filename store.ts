@@ -3,9 +3,11 @@ import * as path from "node:path";
 import type * as lib from "@clusterio/lib";
 import type { Copy, State } from "./state.js";
 
-/** What the store needs: a pull of one save into a file, persistence, a log line and the clock. */
+/** What the store needs: a pull of one save into a file, an instance's host, persistence, a log line and the clock. */
 export type StorePort = {
 	pull(instanceId: number, name: string, file: string): Promise<void>;
+	/** The instance's assigned host, which uploads its saves (P2). */
+	host(instanceId: number): number | null;
 	save(): Promise<void>;
 	log(phase: string, fields: Record<string, unknown>, level?: "info" | "warn"): void;
 	now(): number;
@@ -19,7 +21,8 @@ export function copyable(s: lib.SaveDetails): boolean {
 /**
  * The save store (§4.3 unit 1, §5.1). Each instance's newest copyable save is pulled to <dir>/<id>.zip once it is newer
  * than the copy (any file save, not only autosaves: plan ruling 17).
- * At most `max` of these pulls run at once. The pulls
+ * Each host uploads one of these at a time, with no cluster-wide cap (P2, spike 33b: a host's uplink is the
+ * bottleneck, and a slow one's 300 s attempts mustn't hold the others up); the mover's own pulls don't wait. The pulls
  * of one instance run one after another, so the last one asked for is the copy. A failed pull keeps the previous copy
  * and logs a warning.
  * ponytail: mtimes are the hosts' clocks, and a pull with no mtime (the mover's) is stamped with the controller's.
@@ -27,11 +30,12 @@ export function copyable(s: lib.SaveDetails): boolean {
  */
 export class SaveStore {
 	private waiting = new Map<number, lib.SaveDetails>();
-	private running = 0;
+	/** Hosts uploading a queued save now (P2). */
+	private uploading = new Set<number | null>();
 	private inflight = new Map<number, number>();
 	private chains = new Map<number, Promise<void>>();
 
-	constructor(private state: State, private dir: string, private port: StorePort, private max = 3) { }
+	constructor(private state: State, private dir: string, private port: StorePort) { }
 
 	file(instanceId: number): string {
 		return path.join(this.dir, `${instanceId}.zip`);
@@ -94,18 +98,19 @@ export class SaveStore {
 
 	private pump(): void {
 		for (const [instanceId, s] of this.waiting) {
-			if (this.running >= this.max) {
-				return;
+			const host = this.port.host(instanceId);
+			if (this.uploading.has(host)) {
+				continue;
 			}
 			this.waiting.delete(instanceId);
-			this.running += 1;
+			this.uploading.add(host);
 			this.inflight.set(instanceId, s.mtimeMs);
 			this.pull(instanceId, s.name, s.mtimeMs, s.size).finally(() => {
 				this.inflight.delete(instanceId);
 			}).catch((err: Error) => {
 				this.port.log("pull_failed", { instance: instanceId, save: s.name, error: err.message }, "warn");
 			}).finally(() => {
-				this.running -= 1;
+				this.uploading.delete(host);
 				this.pump();
 			});
 		}

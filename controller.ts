@@ -51,6 +51,7 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 	const telemetry = new Telemetry();
 	const store = new SaveStore(state, path.join(dir, "balancer", "saves"), {
 		pull: (id, name, file) => pull(controller, id, name, file),
+		host: id => controller.instances.get(id)?.config.get("instance.assigned_host") ?? null,
 		save: persist,
 		log: (phase, fields, level = "info") => lifecycle(logger, "balancer.store", phase, fields, level),
 		now: Date.now,
@@ -249,7 +250,7 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 
 	// §5.1: copy every newer save.
 	controller.saves.on("update", (saves: lib.SaveDetails[]) => store.updated(saves));
-	// Not at load: hosts connect after the plugins load, so those pulls would all fail. The host-back hook feeds them.
+	// Not at load or at a host's connect: an instance's saves are fed once its host has listed it (P3, below).
 
 	const announced = new Set<number>();
 	controller.hooks.hostConnectionEvent.attach(plugin.name, async (connection, event) => {
@@ -265,10 +266,6 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 			forget(state.wasRunning, tiles().filter(t => t.host === id).map(t => t.id));
 			void persist();
 			lifecycle(logger, "balancer.host", "back", { host: id, event });
-			// C28: a reconnected host's saves don't re-fire the update, and at start every host counts as gone.
-			store.updated([...controller.saves.values()].filter(
-				s => instance(s.instanceId)?.config.get("instance.assigned_host") === id,
-			));
 			moves.pump(); // a move waiting for this host may go now (C43); the mover holds back before the first pass
 		}
 	});
@@ -276,6 +273,11 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 	// §5.3: an instance running when its host went is started on the target; a stopped one is only reassigned. Its
 	// status turns "unknown" when the host's session closes; running again clears it (C34).
 	controller.hooks.instanceStatusChanged.attach(plugin.name, async (inst, prev) => {
+		// P3 (spike 33c): a connect comes before the host's instance list; once the list makes the status known, the
+		// host can upload. A reconnected host's saves don't re-fire the update (C28); at start every one is unknown.
+		if (prev === "unknown" && inst.status !== "unknown" && inst.status !== "deleted") {
+			store.updated([...controller.saves.values()].filter(s => s.instanceId === inst.id));
+		}
 		const i = state.wasRunning.indexOf(inst.id);
 		if (inst.status === "deleted") { // C45
 			forget(state.wasRunning, [inst.id]);
