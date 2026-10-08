@@ -1,7 +1,7 @@
 import type { InstancePluginContext } from "@clusterio/host";
 import { TelemetryEvent, type Sample } from "./contracts.js";
 import { local } from "./local.js";
-import { REPORT_EVERY, SAMPLE_MS, cpuMs, sample, type Reading } from "./telemetry.js";
+import { REPORT_EVERY, SAMPLE_MS, SaveStalls, cpuMs, sample, type Reading } from "./telemetry.js";
 
 /**
  * The instance plugin (§4.1): every 10 s, game.tick over RCON and the Factorio process's CPU time. The samples go to
@@ -12,6 +12,7 @@ export default async function loadInstancePlugin(context: InstancePluginContext)
 	let timer: ReturnType<typeof setInterval> | undefined;
 	let prev: Reading | undefined;
 	let pending: Sample[] = [];
+	let stalls = new SaveStalls();
 
 	const read = async (): Promise<Reading | undefined> => {
 		const reply = (await instance.sendRcon("/sc rcon.print(game.tick)")).trim();
@@ -34,7 +35,8 @@ export default async function loadInstancePlugin(context: InstancePluginContext)
 		if (!next) {
 			return;
 		}
-		const s = prev ? sample(prev, next) : undefined;
+		const stalled = stalls.take(); // P1: this window's autosave stalls
+		const s = prev ? sample(prev, next, stalled) : undefined;
 		prev = next;
 		if (s) {
 			pending.push(s);
@@ -57,9 +59,16 @@ export default async function loadInstancePlugin(context: InstancePluginContext)
 	instance.hooks.start.attach(plugin.name, async () => {
 		prev = undefined;
 		pending = [];
+		stalls = new SaveStalls();
 		timer = setInterval(() => {
 			void poll();
 		}, SAMPLE_MS);
+	});
+	// P1 (spike 33a): Factorio logs each blocking autosave's start and end; the sample over it leaves the stall out.
+	instance.hooks.output.attach(plugin.name, async parsed => {
+		if (parsed.type === "log") {
+			stalls.line(parsed.message, Date.now());
+		}
 	});
 	instance.hooks.stop.attach(plugin.name, stop);
 	instance.hooks.exit.attach(plugin.name, stop);

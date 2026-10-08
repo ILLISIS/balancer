@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { Telemetry, cpuMs, sample } from "../../telemetry.js";
+import { KEEP_MS, SaveStalls, Telemetry, cpuMs, sample } from "../../telemetry.js";
 
 test("a sample's UPS is the ticks over the time, its ms the CPU time over the ticks (§4.1)", () => {
 	const s = sample({ tick: 1000, cpuMs: 5000, at: 0 }, { tick: 1600, cpuMs: 6200, at: 10_000 });
@@ -50,4 +50,60 @@ test("meanMs windows on the instance's newest sample, so a late report still has
 	t.add(7, [1, 2, 3, 4, 5, 6].map(i => ({ at: now - (6 - i) * 10_000, ups: 60, ms: i })));
 	now += 70_000;
 	assert.equal(t.meanMs(7), 3.5);
+});
+
+test("P1 (spike 33a): a blocking autosave's stall is left out of the sample's elapsed time (Review Focus 1)", () => {
+	const s = sample({ tick: 1000, cpuMs: 0, at: 0 }, { tick: 1552, cpuMs: 0, at: 10_000 }, 800);
+	assert.equal(s?.ups, 60, "552 ticks in 9.2 s of running");
+	const stalls = new SaveStalls();
+	stalls.line("Saving to _autosave3 (blocking).", 1_000);
+	stalls.line("Saving finished", 1_833);
+	stalls.line("Saving finished", 5_000); // a /server-save's end: no autosave started
+	stalls.line("Saving to _autosave4 (non-blocking).", 6_000);
+	stalls.line("Saving finished", 6_500);
+	assert.equal(stalls.take(), 833);
+	assert.equal(stalls.take(), 0, "take() starts over");
+});
+
+test("lagging (§5.5, R14): every sample of the last lag_minutes under the floor, enough of them to cover it", () => {
+	const now = 1_000_000;
+	const t = new Telemetry(() => now);
+	const run = (ups: (i: number) => number, n: number) => Array.from({ length: n }, (_, i) => (
+		{ at: now - (n - 1 - i) * 10_000, ups: ups(i), ms: 1 }
+	));
+	t.add(1, run(() => 50, 18)); // 3 minutes under
+	t.add(2, run(i => (i === 0 ? 58 : 50), 18)); // one sample at the floor
+	t.add(3, run(() => 50, 12)); // only 2 minutes held
+	t.add(4, run(i => (i < 6 ? 60 : 50), 24)); // 4 minutes held, the last 3 under
+	assert.deepEqual([1, 2, 3, 4].map(id => t.lagging(id, 58, 180_000)), [true, false, false, true]);
+	assert.equal(t.lagging(5, 58, 180_000), false, "no samples");
+});
+
+test("lagging (M1): a window longer than the retention behaves as the clamped one", () => {
+	const now = 1_000_000;
+	const t = new Telemetry(() => now);
+	t.add(1, Array.from({ length: 30 }, (_, i) => ({ at: now - (29 - i) * 10_000, ups: 50, ms: 1 })));
+	assert.equal(t.lagging(1, 58, 240_000), true);
+	assert.equal(t.lagging(1, 58, KEEP_MS * 2), true, "clamped, not never");
+});
+
+test("mean (§5.6): the mean UPS and CPU ms per tick of the samples that ended in (from, to]", () => {
+	const now = 1_000_000;
+	const t = new Telemetry(() => now);
+	t.add(7, [
+		{ at: now - 30_000, ups: 50, ms: 9 }, { at: now - 20_000, ups: 59, ms: 2 }, { at: now, ups: 61, ms: null },
+	]);
+	assert.deepEqual(t.mean(7, now - 25_000, now), { ups: 60, ms: 2 });
+	assert.equal(t.mean(7, now, now + 1), undefined);
+	assert.equal(t.mean(8, 0, now), undefined);
+});
+
+test("forget (S2): drops that instance's samples only", () => {
+	const now = 1_000_000;
+	const t = new Telemetry(() => now);
+	t.add(1, [{ at: now, ups: 60, ms: 1 }]);
+	t.add(2, [{ at: now, ups: 60, ms: 1 }]);
+	t.forget(1);
+	assert.equal(t.last(1), undefined);
+	assert.equal(t.last(2)?.ups, 60);
 });

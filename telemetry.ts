@@ -5,16 +5,19 @@ import type { Sample } from "./contracts.js";
 export const SAMPLE_MS = 10_000;
 export const REPORT_EVERY = 6;
 /** The controller keeps 5 minutes per instance: a pre-flight's window and the last minute's mean fit. */
-const KEEP_MS = 300_000;
+export const KEEP_MS = 300_000;
 /** ponytail: x86-64 Linux's USER_HZ; read `getconf CLK_TCK` if a host ever differs. */
 const CLK_TCK = 100;
 
 export type Reading = { tick: number; cpuMs: number | null; at: number };
 
-/** A sample from two readings; undefined when the tick or the clock didn't advance (a restarted or paused game). */
-export function sample(prev: Reading, next: Reading): Sample | undefined {
+/**
+ * A sample from two readings; undefined when the tick or the clock didn't advance (a restarted or paused game).
+ * `stallMs`, the time blocking autosaves stalled the tick loop in between, is left out of the elapsed time (P1).
+ */
+export function sample(prev: Reading, next: Reading, stallMs = 0): Sample | undefined {
 	const ticks = next.tick - prev.tick;
-	const elapsed = next.at - prev.at;
+	const elapsed = next.at - prev.at - stallMs;
 	if (ticks <= 0 || elapsed <= 0) {
 		return undefined;
 	}
@@ -34,6 +37,33 @@ export async function cpuMs(pid: number): Promise<number | null> {
 		return (Number(fields[11]) + Number(fields[12])) * 1000 / CLK_TCK;
 	} catch {
 		return null;
+	}
+}
+
+/**
+ * P1 (spike 33a): a blocking autosave stalls the tick loop from Factorio's "Saving to _autosaveN (blocking)." to its
+ * "Saving finished", and the server doesn't catch the ticks up. This adds the stalls up between two readings.
+ * ponytail: a stall counts in the sample its "Saving finished" lands in, though it may have begun in the one before;
+ * one whose "Saving finished" line arrives after the next reading's RCON reply is subtracted from the following sample.
+ */
+export class SaveStalls {
+	private since: number | undefined;
+	private total = 0;
+
+	line(message: string, now: number): void {
+		if (/^Saving to _autosave\d+ \(blocking\)\.$/.test(message)) {
+			this.since = now;
+		} else if (message === "Saving finished" && this.since !== undefined) {
+			this.total += now - this.since;
+			this.since = undefined;
+		}
+	}
+
+	/** The stalls since the last take(). */
+	take(): number {
+		const total = this.total;
+		this.total = 0;
+		return total;
 	}
 }
 
@@ -74,6 +104,34 @@ export class Telemetry {
 		const since = (recent.at(-1)?.at ?? 0) - 60_000;
 		const ms = recent.flatMap(s => (s.at > since && s.ms !== null ? [s.ms] : []));
 		return ms.length > 0 ? ms.reduce((a, b) => a + b, 0) / ms.length : undefined;
+	}
+
+	/** The mean UPS and CPU ms per tick of the samples that ended in (from, to]; undefined when none did (§5.6). */
+	mean(instanceId: number, from: number, to: number): { ups: number; ms: number | null } | undefined {
+		const window = this.recent(instanceId).filter(s => s.at > from && s.at <= to);
+		if (window.length === 0) {
+			return undefined;
+		}
+		const avg = (xs: number[]) => xs.reduce((a, b) => a + b, 0) / xs.length;
+		const ms = window.flatMap(s => (s.ms === null ? [] : [s.ms]));
+		return { ups: avg(window.map(s => s.ups)), ms: ms.length > 0 ? avg(ms) : null };
+	}
+
+	/**
+	 * §5.5, R14: every sample of the last `lagMs` (back from the newest held) is under `floor`, and enough of them
+	 * cover it. M1: `lagMs` is clamped to what is kept less one report's span, so a longer window still fires.
+	 */
+	lagging(instanceId: number, floor: number, lagMs: number): boolean {
+		lagMs = Math.min(lagMs, KEEP_MS - REPORT_EVERY * SAMPLE_MS);
+		const recent = this.recent(instanceId);
+		const since = (recent.at(-1)?.at ?? 0) - lagMs;
+		const window = recent.filter(s => s.at > since);
+		return window.length >= lagMs / SAMPLE_MS - 1 && window.every(s => s.ups < floor);
+	}
+
+	/** Drop an instance's samples (a move ended). */
+	forget(id: number): void {
+		this.samples.delete(id);
 	}
 
 	private recent(instanceId: number): Sample[] {
