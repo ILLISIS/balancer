@@ -17,9 +17,9 @@ export function statusText(s: Status, now = Date.now()): string[] {
 		return `${t.name} (${t.id}) host ${t.host ?? "-"} ${t.status} ups ${ups} ms ${ms} players ${t.players} ${copy}`;
 	});
 	for (const m of s.moves) {
-		// C13: a move that ended back on its source with an error was put back, not done.
+		// C13, C30: a finished move that went back to its source shows why.
 		let error = m.error === null ? "" : ` (${m.error})`;
-		if (m.error !== null && m.to === m.from) {
+		if (m.error !== null && m.back && m.step === "done") {
 			error = ` returned: ${m.error}`;
 		}
 		const route = `${m.from ?? "-"} -> ${m.to ?? "?"}`;

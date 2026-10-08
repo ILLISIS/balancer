@@ -62,7 +62,8 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 	}
 
 	const instance = (id: number) => controller.instances.get(id);
-	const players = (id: number) => [...controller.users.values()].filter(u => u.instances.has(id)).length;
+	// The raw records: users.values() builds a User per record, on every call.
+	const players = (id: number) => [...controller.users.records.values()].filter(u => u.instances.has(id)).length;
 	const tiles = () => [...controller.instances.values()].map(i => ({
 		id: i.id, host: i.config.get("instance.assigned_host"), status: i.status,
 	}));
@@ -121,11 +122,11 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 			}
 		},
 		tick: async id => {
-			const tick = Number((await rcon(id, "/sc rcon.print(game.tick)")).trim());
-			if (!Number.isInteger(tick)) {
+			const reply = (await rcon(id, "/sc rcon.print(game.tick)")).trim();
+			if (!/^\d+$/.test(reply)) {
 				throw new Error(`instance ${id} answered no tick`);
 			}
-			return tick;
+			return Number(reply);
 		},
 		stop: async id => {
 			await controller.sendTo({ instanceId: id }, new lib.InstanceStopRequest());
@@ -147,7 +148,11 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 		}, level),
 		finished: m => {
 			for (const listener of listeners) {
-				listener(m.instanceId);
+				try {
+					listener(m.instanceId);
+				} catch (err: any) {
+					logger.error(`balancer: a move-finished listener threw: ${err.message}`);
+				}
 			}
 		},
 	};
@@ -208,8 +213,9 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 
 	// §5.1: copy every newer save, and the ones the hosts listed before this start.
 	controller.saves.on("update", (saves: lib.SaveDetails[]) => store.updated(saves));
-	store.updated([...controller.saves.values()]);
+	// Not at load: hosts connect after the plugins load, so those pulls would all fail. The host-back hook feeds them.
 
+	let resumed = false;
 	controller.hooks.hostConnectionEvent.attach(plugin.name, async (connection, event) => {
 		const id = connection.id;
 		if (event === "drop" || event === "close") {
@@ -219,13 +225,18 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 			}
 		} else if (gone.delete(id)) {
 			lifecycle(logger, "balancer.host", "back", { host: id, event });
-			moves.pump();
+			// C28: a reconnected host's saves don't re-fire the update, and at start every host counts as gone.
+			store.updated([...controller.saves.values()].filter(
+				s => instance(s.instanceId)?.config.get("instance.assigned_host") === id,
+			));
+			if (resumed) {
+				moves.pump();
+			}
 		}
 	});
 
 	// §4.3 unit 3, every 30 s. The first pass resumes the moves a restart interrupted, once the hosts have had time to
 	// reconnect (plan ruling 15).
-	let resumed = false;
 	const pass = () => {
 		if (!resumed) {
 			resumed = true;

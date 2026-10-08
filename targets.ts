@@ -4,12 +4,6 @@ export type HostFact = { id: number; connected: boolean };
 export type TileFact = { id: number; host: number | null; status: string };
 
 /**
- * §5.8 in phase 1 (§11: no benchmark yet, so no speed or slots). Eligible: connected, not `from`, and every running
- * tile on it at `floor` UPS or above in its last sample (plan ruling 14; a tile with no sample yet doesn't
- * block). Ranked by the fewest busy tiles (the last minute's mean CPU ms per tick at `busyMs` or more), then by id.
- * The pre-flight decides.
- */
-/**
  * The pre-flight's pass rule (C2, C3): under `maxMs` per tick, and the target's running tiles at `floor` UPS or above.
  * No UPS sample in the window only passes a target with nothing running on it.
  */
@@ -19,6 +13,12 @@ export function verdict(
 	return msPerTick < maxMs && (minUps === null || minUps === undefined ? !targetHasRunning : minUps >= floor);
 }
 
+/**
+ * §5.8 in phase 1 (§11: no benchmark yet, so no speed or slots). Eligible: connected, not `from`, and every running
+ * tile on it at `floor` UPS or above in its last sample (plan ruling 14; a tile with no sample yet doesn't
+ * block). Ranked by the fewest busy tiles (the last minute's mean CPU ms per tick at `busyMs` or more), then by id.
+ * The pre-flight decides.
+ */
 export function candidates(
 	from: number | null,
 	hosts: HostFact[],

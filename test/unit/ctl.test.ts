@@ -32,7 +32,8 @@ test("C13: a move that came back to its source shows as returned", () => {
 		wasRunning: true, tried: [2], failures: 3, back: true, save: null, tick: null, startedAt: 1, endedAt: 2,
 		error: "push failed",
 	};
-	assert.deepEqual(statusText({ hosts: [], tiles: [], moves: [move] }), [
+	assert.deepEqual(statusText({ hosts: [], tiles: [], moves: [move, { ...move, step: "failed" }] }), [
 		"move 7-1 manual instance 7 1 -> 1 done returned: push failed",
+		"move 7-1 manual instance 7 1 -> 1 failed (push failed)",
 	]);
 });
