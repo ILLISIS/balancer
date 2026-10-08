@@ -218,15 +218,15 @@ export class Mover {
 	private async stop(m: Move): Promise<void> {
 		const id = m.instanceId;
 		if (this.port.status(id) !== "stopped") {
-			if (this.port.players(id) > 0) {
-				return this.end(m, "failed", "players are on the tile: only empty tiles move (B4)");
-			}
 			m.save = this.port.loadedSave(id) ?? null;
 			if (m.save === null) {
 				return this.end(m, "failed", "the running tile lists no save to pull");
 			}
 			m.tick = await this.port.tick(id);
 			await this.port.save();
+			if (this.port.players(id) > 0) { // C22: as late as possible, so a player who just joined isn't kicked
+				return this.end(m, "failed", "players are on the tile: only empty tiles move (B4)");
+			}
 			try {
 				await this.port.stop(id);
 			} catch (err: any) {
@@ -271,6 +271,8 @@ export class Mover {
 			if (m.tick !== null) {
 				const tick = await this.port.tick(id);
 				if (tick < m.tick) {
+					// C23: stopped, so the retry's start loads the re-pushed copy.
+					await this.port.stop(id);
 					throw new Error(`it loaded tick ${tick}, before the saved ${m.tick}`);
 				}
 			}
@@ -287,7 +289,11 @@ export class Mover {
 			await this.port.save();
 			return this.port.wait(RETRY_MS);
 		}
-		if (!m.back && m.from !== null && m.from !== m.to && this.port.hostConnected(m.from)) {
+		// C21: an unknown status may be a copy still running on H; going back would start a second one (§5.3 decides).
+		if (
+			!m.back && m.from !== null && m.from !== m.to && this.port.hostConnected(m.from)
+			&& this.port.status(m.instanceId) !== "unknown"
+		) {
 			m.back = true;
 			m.error = error; // C13: the done that follows shows why the tile came back
 			m.to = m.from;

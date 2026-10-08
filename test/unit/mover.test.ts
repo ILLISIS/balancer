@@ -24,7 +24,8 @@ function deferred() {
 /**
  * A fake cluster: hosts 1–3 connected; instances 7 and 8 running on host 1, with no players; every game at tick 100.
  * Each call is recorded as text in `calls`, and in `trail` with "saved <step>" for each persist. A call whose text is
- * in `failing` throws, and a pre-flight in `failing` fails. `gates` holds a host's pre-flights until the test opens them.
+ * in `failing` throws, and a pre-flight in `failing` fails. `gates` holds a host's pre-flights until the test opens
+ * them.
  */
 function fake(config: Partial<MoverConfig> = {}) {
 	const calls: string[] = [];
@@ -32,6 +33,7 @@ function fake(config: Partial<MoverConfig> = {}) {
 	const phases: string[] = [];
 	const finished: string[] = [];
 	const failing = new Set<string>();
+	const keepRunning = new Set<number>();
 	const gates = new Map<number, Promise<void>>();
 	const hosts = new Map([[1, true], [2, true], [3, true]]);
 	const status = new Map<number, string>([[7, "running"], [8, "running"]]);
@@ -65,7 +67,9 @@ function fake(config: Partial<MoverConfig> = {}) {
 			return 100;
 		},
 		stop: async id => {
-			status.set(id, "stopped");
+			if (!keepRunning.has(id)) {
+				status.set(id, "stopped");
+			}
 			call(`stop ${id}`);
 		},
 		pull: async (id, save) => {
@@ -93,7 +97,9 @@ function fake(config: Partial<MoverConfig> = {}) {
 		},
 	};
 	const mover = new Mover(moves, bad, port, () => ({ maxConcurrent: 3, badPairHours: 24, ...config }));
-	return { mover, calls, trail, phases, finished, failing, gates, hosts, status, state, moves, bad };
+	return {
+		port, keepRunning, mover, calls, trail, phases, finished, failing, gates, hosts, status, state, moves, bad,
+	};
 }
 
 const manual = { from: 1, reason: "manual" as const, wasRunning: true };
@@ -170,7 +176,7 @@ test("players on the tile at the stop step: the move ends and T keeps running (B
 	f.state.players = 1; // a player joins during the pre-flight
 	gate.resolve();
 	await settle();
-	assert.deepEqual(f.calls, ["preflight 7 2"]);
+	assert.deepEqual(f.calls, ["preflight 7 2", "tick 7"]);
 	assert.equal(m.step, "failed");
 	assert.match(m.error ?? "", /players are on the tile/);
 	assert.equal(f.status.get(7), "running");
@@ -292,4 +298,57 @@ test("a stop that throws after the tile stopped starts it again on its source (C
 	assert.deepEqual(f.calls.slice(-2), ["stop 7", "start 7 world.zip"]);
 	assert.deepEqual([m.step, m.error], ["failed", "stop failed: stop 7 failed"]);
 	assert.equal(f.status.get(7), "running");
+});
+
+test("retries exhausted with the status unknown: no second copy on the source; the move fails (C21)", async () => {
+	const f = fake();
+	f.port.assign = async (id, h) => {
+		f.calls.push(`assign ${id} ${h}`);
+		f.status.set(id, "unknown");
+		throw new Error("connection lost");
+	};
+	const m = f.mover.add({ instanceId: 7, ...manual });
+	await settle();
+	assert.deepEqual(f.calls.filter(c => c.startsWith("assign") || c.startsWith("start")), [
+		"assign 7 2", "assign 7 2", "assign 7 2",
+	]);
+	assert.deepEqual([m.step, m.back, m.to, m.error], ["failed", false, 2, "connection lost"]);
+});
+
+test("a start that loads an older tick stops T, and the retry starts it again (C23)", async () => {
+	const f = fake();
+	let reads = 0;
+	f.port.tick = async id => {
+		f.calls.push(`tick ${id}`);
+		reads += 1;
+		return reads === 2 ? 50 : 100;
+	};
+	const m = f.mover.add({ instanceId: 7, ...manual });
+	await settle();
+	assert.deepEqual(f.calls.slice(-8), [
+		"push 7", "start 7 balancer.zip", "tick 7", "stop 7", "assign 7 2", "push 7", "start 7 balancer.zip", "tick 7",
+	]);
+	assert.deepEqual([m.step, m.failures], ["done", 1]);
+});
+
+test("a restart resumed at the start step with T already running only reads the tick (C25)", async () => {
+	const f = fake();
+	f.moves.push({
+		id: "7-1", instanceId: 7, from: 1, to: 2, reason: "manual", pinned: false, step: "start", wasRunning: true,
+		tried: [2], failures: 0, back: false, save: "balancer.zip", tick: 100, startedAt: 1, endedAt: null, error: null,
+	});
+	f.mover.resume();
+	await settle();
+	assert.deepEqual(f.calls, ["tick 7"]);
+	assert.equal(f.moves[0].step, "done");
+});
+
+test("a stop that throws while T still runs ends the move failed with no restart (C25)", async () => {
+	const f = fake();
+	f.keepRunning.add(7);
+	f.failing.add("stop 7");
+	const m = f.mover.add({ instanceId: 7, ...manual });
+	await settle();
+	assert.deepEqual(f.calls.slice(-2), ["tick 7", "stop 7"]);
+	assert.deepEqual([m.step, f.status.get(7)], ["failed", "running"]);
 });

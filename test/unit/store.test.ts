@@ -98,3 +98,16 @@ test("a save being pulled is not queued again by a repeat listing", async () => 
 	await settle();
 	assert.equal(pulls.length, 1);
 });
+
+test("a direct pull drops the older save queued for the same instance (C24)", async () => {
+	const { store, pulls } = fakeStore(1);
+	store.updated([save(8, "a.zip", 100), save(7, "_autosave1.zip", 100)]);
+	await settle();
+	assert.deepEqual(pulls.map(p => p.id), [8]);
+	void store.pull(7, "stopped.zip");
+	await settle();
+	pulls[1].resolve();
+	pulls[0].resolve();
+	await settle();
+	assert.deepEqual(pulls.map(p => p.name), ["a.zip", "stopped.zip"]);
+});
