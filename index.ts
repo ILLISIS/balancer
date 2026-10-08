@@ -1,5 +1,5 @@
 import type * as lib from "@clusterio/lib";
-import { MoveRequest, PreflightRequest, StatusRequest, TelemetryEvent } from "./contracts.js";
+import { HostLeavingEvent, MoveRequest, PreflightRequest, StatusRequest, TelemetryEvent } from "./contracts.js";
 
 declare module "@clusterio/lib" {
 	export interface ControllerConfigFields {
@@ -66,7 +66,7 @@ export const plugin: lib.PluginDeclaration = {
 			12,
 		),
 	},
-	messages: [TelemetryEvent, PreflightRequest, MoveRequest, StatusRequest],
+	messages: [HostLeavingEvent, TelemetryEvent, PreflightRequest, MoveRequest, StatusRequest],
 	permissions: [
 		{
 			name: "balancer.view",

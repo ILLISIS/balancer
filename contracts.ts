@@ -153,3 +153,23 @@ export class StatusRequest {
 	static permission = "balancer.view" as const;
 	static Response = lib.plainJson(StatusSchema);
 }
+
+/**
+ * Host → controller (§5.3): this host is shutting down cleanly and these instances are running; their stops that
+ * follow must not hide that failover starts them on the target.
+ */
+export class HostLeavingEvent {
+	declare ["constructor"]: typeof HostLeavingEvent;
+	static type = "event" as const;
+	static src = "host" as const;
+	static dst = "controller" as const;
+	static plugin = "balancer" as const;
+
+	constructor(public running: number[]) { }
+
+	static jsonSchema = Type.Object({ running: Type.Array(Type.Integer()) });
+
+	static fromJSON(json: Static<typeof HostLeavingEvent.jsonSchema>) {
+		return new this(json.running);
+	}
+}

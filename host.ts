@@ -4,7 +4,7 @@ import * as path from "node:path";
 import * as lib from "@clusterio/lib";
 import type { HostPluginContext } from "@clusterio/host";
 import { lifecycle } from "universal_edges/runtime";
-import { PreflightRequest } from "./contracts.js";
+import { HostLeavingEvent, PreflightRequest } from "./contracts.js";
 import { Fence, fenceEvent } from "./fence.js";
 import { local } from "./local.js";
 import { benchmark, factorioInstall, modsDir } from "./preflight.js";
@@ -31,6 +31,15 @@ export default async function loadHostPlugin(context: HostPluginContext) {
 	});
 	host.hooks.controllerConnectionEvent.attach(plugin.name, async event => {
 		fence.event(fenceEvent(event, host._shuttingDown));
+	});
+
+	// §5.3: a clean shutdown stops the instances before it disconnects; say which were running first (C34).
+	host.hooks.shutdown.attach(plugin.name, async () => {
+		const running = [...host.instanceConnections.values()].map(c => c.instance)
+			.filter(i => i.status === "starting" || i.status === "running").map(i => i.id);
+		if (running.length > 0) {
+			host.send(new HostLeavingEvent(running));
+		}
 	});
 
 	// §5.2 step 1: benchmark the controller's copy of a tile here, next to this host's running tiles.

@@ -40,12 +40,23 @@ export function failovers(
 
 /**
  * Whether failover starts the instance on the target: it was running when its host went (`recorded`), or its latest
- * move failed after it had been running, which left it stopped (C26).
+ * move failed after the mover stopped or killed it, which left it stopped (C26). A failed record's step is "failed",
+ * so "got past the pre-flight" reads as `save`, which the stop step sets before it stops anything (C35).
  */
 export function wasRunningBefore(instanceId: number, recorded: number[], moves: Move[]): boolean {
 	if (recorded.includes(instanceId)) {
 		return true;
 	}
 	const latest = moves.filter(m => m.instanceId === instanceId).at(-1);
-	return latest?.step === "failed" && latest.wasRunning;
+	return latest?.step === "failed" && latest.wasRunning && latest.save !== null;
+}
+
+/** C34: forget the recorded instances `ids` (a host that came back before failover: the operator decides then). */
+export function forget(recorded: number[], ids: number[]): void {
+	for (const id of ids) {
+		const i = recorded.indexOf(id);
+		if (i !== -1) {
+			recorded.splice(i, 1);
+		}
+	}
 }

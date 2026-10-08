@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import * as lib from "@clusterio/lib";
 import { balancerApi, setBalancerApi } from "../../api.js";
-import { MoveRequest, PreflightRequest, TelemetryEvent } from "../../contracts.js";
+import { HostLeavingEvent, MoveRequest, PreflightRequest, TelemetryEvent } from "../../contracts.js";
 import { plugin } from "../../index.js";
 
 // Compiled to dist/node/test/unit/; the plugin root is four levels up.
@@ -24,14 +24,15 @@ test("the declaration names the plugin; each compiled entrypoint exists and expo
 	}
 });
 
-test("it registers its 4 messages and 2 permissions, and §6's defaults", () => {
+test("it registers its 5 messages and 2 permissions, and §6's defaults", () => {
 	lib.registerPluginMessages([plugin] as unknown as lib.PluginNodeEnvInfo[]);
 	lib.registerPluginPermissions([plugin] as unknown as lib.PluginNodeEnvInfo[]);
 	assert.ok(lib.Link._eventsByName.has("balancer:TelemetryEvent"));
+	assert.ok(lib.Link._eventsByName.has("balancer:HostLeavingEvent"));
 	for (const name of ["PreflightRequest", "MoveRequest", "StatusRequest"]) {
 		assert.ok(lib.Link._requestsByName.has(`balancer:${name}`), name);
 	}
-	assert.equal(plugin.messages?.length, 4);
+	assert.equal(plugin.messages?.length, 5);
 	assert.ok(lib.permissions.has("balancer.view") && lib.permissions.has("balancer.move"));
 	const defaults = Object.fromEntries(
 		Object.entries(plugin.controllerConfigFields ?? {}).map(([field, def]) => [field, def.initialValue]),
@@ -56,6 +57,7 @@ test("every message survives the JSON its link carries", () => {
 	};
 	const samples = [{ at: 1000, ups: 59.5, ms: 2.25 }, { at: 11000, ups: 60, ms: null }];
 	assert.deepEqual(roundTrip(TelemetryEvent, new TelemetryEvent(samples)), new TelemetryEvent(samples));
+	assert.deepEqual(roundTrip(HostLeavingEvent, new HostLeavingEvent([4, 5])), new HostLeavingEvent([4, 5]));
 	assert.deepEqual(roundTrip(MoveRequest, new MoveRequest(7)), new MoveRequest(7));
 	assert.deepEqual(roundTrip(MoveRequest, new MoveRequest(7, 2)), new MoveRequest(7, 2));
 	const pack = new lib.ModPack();

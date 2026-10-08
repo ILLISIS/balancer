@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { failovers, goneHosts, wasRunningBefore } from "../../failover.js";
+import { failovers, forget, goneHosts, wasRunningBefore } from "../../failover.js";
 import type { Move } from "../../contracts.js";
 
 test("a host is gone once it has been away for the grace and its session is closed (§5.3, spike 32)", () => {
@@ -20,14 +20,25 @@ test("failovers: each instance of a gone host with a copy and no move under way;
 });
 
 test("was running: recorded when the host went, or the latest move failed after it had been running (C26)", () => {
-	type Spec = { instanceId: number; step: Move["step"]; wasRunning: boolean };
-	const move = (instanceId: number, step: Move["step"], wasRunning: boolean) => (
-		{ instanceId, step, wasRunning } as Spec as Move
+	type Spec = { instanceId: number; step: Move["step"]; wasRunning: boolean; save: string | null };
+	const move = (instanceId: number, step: Move["step"], wasRunning: boolean, save: string | null = "s.zip") => (
+		{ instanceId, step, wasRunning, save } as Spec as Move
 	);
-	const moves = [move(1, "failed", true), move(2, "failed", false), move(3, "failed", true), move(3, "done", true)];
+	const moves = [
+		move(1, "failed", true), move(2, "failed", false), move(3, "failed", true), move(3, "done", true),
+		move(6, "failed", true, null), // failed in the pre-flight (C35): nothing was stopped
+	];
 	assert.equal(wasRunningBefore(1, [], moves), true);
 	assert.equal(wasRunningBefore(2, [], moves), false);
 	assert.equal(wasRunningBefore(3, [], moves), false); // its latest move is done
 	assert.equal(wasRunningBefore(4, [4], moves), true);
 	assert.equal(wasRunningBefore(5, [], moves), false);
+	assert.equal(wasRunningBefore(6, [], moves), false);
+	assert.equal(wasRunningBefore(6, [6], moves), true);
+});
+
+test("forget drops the recorded instances of a host that came back (C34)", () => {
+	const recorded = [1, 2, 3];
+	forget(recorded, [2, 9]);
+	assert.deepEqual(recorded, [1, 3]);
 });

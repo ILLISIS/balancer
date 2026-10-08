@@ -5,8 +5,10 @@ import * as lib from "@clusterio/lib";
 import type { ControllerPluginContext } from "@clusterio/controller";
 import { lifecycle, rateLimited } from "universal_edges/runtime";
 import { setBalancerApi } from "./api.js";
-import { MoveRequest, PreflightRequest, StatusRequest, TelemetryEvent, type Status } from "./contracts.js";
-import { RETRY_FAILED_MS, failovers, goneHosts, wasRunningBefore } from "./failover.js";
+import {
+	HostLeavingEvent, MoveRequest, PreflightRequest, StatusRequest, TelemetryEvent, type Status,
+} from "./contracts.js";
+import { RETRY_FAILED_MS, failovers, forget, goneHosts, wasRunningBefore } from "./failover.js";
 import { Mover, type MoverPort } from "./mover.js";
 import { openState } from "./state.js";
 import { SaveStore, copyable } from "./store.js";
@@ -163,6 +165,16 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 	}));
 	mover = moves;
 
+	// C34: a host shutting down cleanly says which tiles ran, before their stops hide it.
+	controller.handle(HostLeavingEvent, async (event: HostLeavingEvent) => {
+		for (const id of event.running) {
+			if (!state.wasRunning.includes(id)) {
+				state.wasRunning.push(id);
+			}
+		}
+		await persist();
+	});
+
 	controller.handle(TelemetryEvent, async (event: TelemetryEvent, src: lib.Address) => {
 		telemetry.receive(src.id, event.samples);
 	});
@@ -227,6 +239,9 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 			}
 		} else if (gone.delete(id)) {
 			announced.delete(id);
+			// C34: back before failover, the operator decides; a recorded start would surprise them.
+			forget(state.wasRunning, tiles().filter(t => t.host === id).map(t => t.id));
+			void persist();
 			lifecycle(logger, "balancer.host", "back", { host: id, event });
 			// C28: a reconnected host's saves don't re-fire the update, and at start every host counts as gone.
 			store.updated([...controller.saves.values()].filter(
@@ -239,13 +254,13 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 	});
 
 	// §5.3: an instance running when its host went is started on the target; a stopped one is only reassigned. Its
-	// status turns "unknown" when the host's session closes; any real status after that clears it.
+	// status turns "unknown" when the host's session closes; running again clears it (C34).
 	controller.hooks.instanceStatusChanged.attach(plugin.name, async (inst, prev) => {
 		const i = state.wasRunning.indexOf(inst.id);
 		if (inst.status === "unknown" && (prev === "running" || prev === "starting") && i === -1) {
 			state.wasRunning.push(inst.id);
 			await persist();
-		} else if (inst.status !== "unknown" && i !== -1) {
+		} else if ((inst.status === "running" || inst.status === "starting") && i !== -1) {
 			state.wasRunning.splice(i, 1);
 			await persist();
 		}
