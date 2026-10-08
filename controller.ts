@@ -6,8 +6,10 @@ import type { ControllerPluginContext } from "@clusterio/controller";
 import { lifecycle, rateLimited } from "universal_edges/runtime";
 import { setBalancerApi } from "./api.js";
 import {
-	HostLeavingEvent, MoveRequest, PreflightRequest, StatusRequest, TelemetryEvent, type Status,
+	DrainRequest, HostLeavingEvent, MoveRequest, PreflightRequest, StatusRequest, TelemetryEvent, type Check, type Move,
+	type Status,
 } from "./contracts.js";
+import { applyCheck, decide, dueChecks, type Add, type View } from "./decider.js";
 import { RETRY_FAILED_MS, adoptOrphans, failovers, forget, goneHosts, wasRunningBefore } from "./failover.js";
 import { Mover, type MoverPort } from "./mover.js";
 import { openState } from "./state.js";
@@ -189,6 +191,9 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 			}, level);
 		},
 		finished: m => {
+			if (m.step === "done") {
+				telemetry.forget(m.instanceId); // S2: its samples from the old host don't count on the new one
+			}
 			for (const listener of listeners) {
 				try {
 					listener(m.instanceId);
@@ -247,12 +252,33 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 		return { moveId: m.id };
 	});
 
+	// §5.4: the operator's drain toggle. Drain runs whatever balancer.enabled says (P4).
+	controller.handle(DrainRequest, async (request: DrainRequest) => {
+		if (!controller.hosts.get(request.hostId)) {
+			throw new lib.RequestError(`host ${request.hostId} does not exist`);
+		}
+		const i = state.draining.indexOf(request.hostId);
+		if (request.on && i === -1) {
+			state.draining.push(request.hostId);
+		} else if (!request.on && i !== -1) {
+			state.draining.splice(i, 1);
+		}
+		await persist();
+		lifecycle(logger, "balancer.drain", request.on ? "on" : "off", { host: request.hostId });
+	});
+
 	controller.handle(StatusRequest, async (): Promise<Status> => ({
 		hosts: [...controller.hosts.values()].map(h => ({
 			id: h.id,
 			name: h.name,
 			connected: h.connected,
 			goneSinceMs: gone.has(h.id) ? wallOf(gone.get(h.id)!) : null,
+			speed: speedOf(h.id),
+			slots: slotsOf(h.id),
+			learned: state.hosts[h.id]?.learned !== undefined,
+			busy: busyOn(h.id),
+			draining: state.draining.includes(h.id),
+			benchmarking: benchmarking.has(h.id),
 		})),
 		tiles: [...controller.instances.values()].map(i => ({
 			id: i.id,
@@ -312,7 +338,7 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 	});
 	const warn = rateLimited(logger, 600_000);
 	/** §5.3: every gone host's instances move with their stored copies; candidates are pre-flighted one at a time. */
-	const failover = () => {
+	const failover = (): Add[] => {
 		const now = Date.now();
 		const graceMs = config.get("balancer.failover_grace_minutes") * 60_000;
 		const ids = goneHosts(gone, performance.now(), graceMs, port.hostConnected);
@@ -324,22 +350,64 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 			&& m.step === "failed" && now - (m.endedAt ?? 0) < RETRY_FAILED_MS);
 		const orphansHome = adoptOrphans(tiles(), state.moves);
 		const { move, noCopy } = failovers(ids, orphansHome, id => moves.moving(id) || failedLately(id), port.hasCopy);
-		for (const f of move) {
-			const wasRunning = wasRunningBefore(f.instanceId, state.wasRunning, state.moves);
-			moves.add({ instanceId: f.instanceId, from: f.from, reason: "failover", wasRunning });
-		}
 		for (const id of noCopy) {
 			const fields = { op: "balancer.failover", phase: "no_copy", instance: id };
 			warn(`no_copy:${id}`, "balancer.failover no_copy: no stored copy, so it stays on its gone host", fields);
 		}
+		return move.map((f): Add => ({
+			instanceId: f.instanceId, from: f.from, reason: "failover",
+			wasRunning: wasRunningBefore(f.instanceId, state.wasRunning, state.moves),
+		}));
+	};
+
+	/** What the decider reads (§4.3 unit 3): the cluster as it is now. */
+	const view = (): View => ({
+		now: Date.now(),
+		connected: [...controller.hosts.values()].filter(h => h.connected).map(h => h.id),
+		tiles: tiles().map(t => ({ ...t, players: players(t.id), hasCopy: port.hasCopy(t.id) })),
+		moves: state.moves,
+		draining: state.draining,
+		benchmarking,
+		telemetry,
+		floor: config.get("balancer.ups_floor"),
+		busyMs: config.get("balancer.busy_tile_ms"),
+		lagMs: config.get("balancer.lag_minutes") * 60_000,
+		checkMs: config.get("balancer.after_check_minutes") * 60_000,
+	});
+	/** §5.6: record an after-check; a failed one marks its pair bad and lowers its host's slots. Logged either way. */
+	const judge = (m: Move, check: Check) => {
+		const badMs = config.get("balancer.bad_pair_hours") * 3_600_000;
+		const learned = applyCheck(m, check, state, Date.now(), badMs, config.get("balancer.ups_floor"));
+		let outcome = "skipped";
+		if (check.ok !== null) {
+			outcome = check.ok ? "passed" : "failed";
+		}
+		lifecycle(logger, "balancer.check", outcome, {
+			move: m.id, instance: m.instanceId, host: m.to, reason: m.reason, ups: check.ups, ms: check.ms,
+			others_min_ups: check.othersMinUps, predicted_ms: m.preflight?.msPerTick ?? null,
+			...(learned === undefined ? {} : { learned_slots: learned }),
+		}, check.ok === false ? "warn" : "info");
+		void persist();
 	};
 
 	// §4.3 unit 3, every 30 s. The first pass lets the mover start; it resumes the moves a restart interrupted as their
-	// hosts reconnect, or after the grace (plan ruling 15, C43).
+	// hosts reconnect, or after the grace (plan ruling 15, C43). The after-checks due are judged every pass; then the
+	// first rule with work queues its moves (R1).
 	const pass = () => {
 		moves.resume();
-		if (config.get("balancer.enabled")) {
-			failover();
+		const v = view();
+		for (const { move, check } of dueChecks(v)) {
+			judge(move, check);
+		}
+		// P4: balancer.enabled gates failover, overload and the after-check's re-move; drain runs either way.
+		const enabled = config.get("balancer.enabled");
+		const d = decide(v, enabled ? failover() : [], enabled);
+		for (const a of d.add) {
+			moves.add(a);
+		}
+		for (const b of d.beyond) {
+			const fields = { op: "balancer.overload", phase: "beyond", host: b.host, instance: b.instance };
+			warn(`beyond:${b.instance}`, "balancer.overload beyond: it lags as its host's only busy tile", fields);
 		}
 		moves.pump();
 	};

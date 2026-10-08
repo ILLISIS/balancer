@@ -73,6 +73,15 @@ export const StatusSchema = Type.Object({
 		connected: Type.Boolean(),
 		/** When the balancer saw it go; null while it is connected. */
 		goneSinceMs: nullable(Type.Number()),
+		/** The join benchmark's ms per tick with one copy (§5.7); null: unbenchmarked. */
+		speed: nullable(Type.Number()),
+		/** The busy tiles it takes: learned (§5.6) or the benchmark's; null: no limit. */
+		slots: nullable(Type.Integer()),
+		learned: Type.Boolean(),
+		/** Its running tiles at balancer.busy_tile_ms or more. */
+		busy: Type.Integer(),
+		draining: Type.Boolean(),
+		benchmarking: Type.Boolean(),
 	})),
 	tiles: Type.Array(Type.Object({
 		id: Type.Integer(),
