@@ -40,15 +40,18 @@ export function failovers(
 
 /**
  * Whether failover starts the instance on the target: it was running when its host went (`recorded`), or its latest
- * move failed after the mover stopped or killed it, which left it stopped (C26). A failed record's step is "failed",
- * so "got past the pre-flight" reads as `save`, which the stop step sets before it stops anything (C35).
+ * move failed with it stopped (C26). A failed non-failover move counts once it got past the pre-flight: a failed
+ * record's step is "failed", so that reads as `save`, which the stop step sets before the tick read and the players
+ * check (C35). A failed failover counts always: it carries the wasRunning it got by this same rule (a failover sets
+ * `save` only at push, so a pre-flight or assign failure has none).
  */
 export function wasRunningBefore(instanceId: number, recorded: number[], moves: Move[]): boolean {
 	if (recorded.includes(instanceId)) {
 		return true;
 	}
 	const latest = moves.filter(m => m.instanceId === instanceId).at(-1);
-	return latest?.step === "failed" && latest.wasRunning && latest.save !== null;
+	return latest?.step === "failed" && latest.wasRunning
+		&& (latest.save !== null || latest.reason === "failover");
 }
 
 /** C34: forget the recorded instances `ids` (a host that came back before failover: the operator decides then). */

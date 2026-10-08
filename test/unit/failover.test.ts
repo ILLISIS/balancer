@@ -20,12 +20,14 @@ test("failovers: each instance of a gone host with a copy and no move under way;
 });
 
 test("was running: recorded when the host went, or the latest move failed after it had been running (C26)", () => {
-	type Spec = { instanceId: number; step: Move["step"]; wasRunning: boolean; save: string | null };
-	const move = (instanceId: number, step: Move["step"], wasRunning: boolean, save: string | null = "s.zip") => (
-		{ instanceId, step, wasRunning, save } as Spec as Move
-	);
+	type Spec = { instanceId: number; step: Move["step"]; wasRunning: boolean; save: string | null; reason: string };
+	const move = (
+		instanceId: number, step: Move["step"], wasRunning: boolean, save: string | null = "s.zip",
+		reason = "manual",
+	) => ({ instanceId, step, wasRunning, save, reason } as Spec as Move);
 	const moves = [
 		move(1, "failed", true), move(2, "failed", false), move(3, "failed", true), move(3, "done", true),
+		move(7, "failed", true, null, "failover"), // a failover that failed before its push
 		move(6, "failed", true, null), // failed in the pre-flight (C35): nothing was stopped
 	];
 	assert.equal(wasRunningBefore(1, [], moves), true);
@@ -34,6 +36,7 @@ test("was running: recorded when the host went, or the latest move failed after 
 	assert.equal(wasRunningBefore(4, [4], moves), true);
 	assert.equal(wasRunningBefore(5, [], moves), false);
 	assert.equal(wasRunningBefore(6, [], moves), false);
+	assert.equal(wasRunningBefore(7, [], moves), true);
 	assert.equal(wasRunningBefore(6, [6], moves), true);
 });
 

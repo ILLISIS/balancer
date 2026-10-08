@@ -38,7 +38,12 @@ export default async function loadHostPlugin(context: HostPluginContext) {
 		const running = [...host.instanceConnections.values()].map(c => c.instance)
 			.filter(i => i.status === "starting" || i.status === "running").map(i => i.id);
 		if (running.length > 0) {
-			host.send(new HostLeavingEvent(running));
+			try {
+				host.send(new HostLeavingEvent(running));
+			} catch (err: any) {
+				// The session is gone already (controller down): there is nobody to tell.
+				logger.verbose(`balancer: HostLeavingEvent not sent: ${err.message}`);
+			}
 		}
 	});
 
