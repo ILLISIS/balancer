@@ -68,10 +68,11 @@ export class Telemetry {
 		return ups.length > 0 ? Math.min(...ups) : undefined;
 	}
 
-	/** The mean CPU ms per tick of the last minute's samples that have one. */
+	/** The mean CPU ms per tick of the samples that have one, within 60 s of the newest sample held (ruling C15). */
 	meanMs(instanceId: number): number | undefined {
-		const since = this.now() - 60_000;
-		const ms = this.recent(instanceId).flatMap(s => (s.at > since && s.ms !== null ? [s.ms] : []));
+		const recent = this.recent(instanceId);
+		const since = (recent.at(-1)?.at ?? 0) - 60_000;
+		const ms = recent.flatMap(s => (s.at > since && s.ms !== null ? [s.ms] : []));
 		return ms.length > 0 ? ms.reduce((a, b) => a + b, 0) / ms.length : undefined;
 	}
 

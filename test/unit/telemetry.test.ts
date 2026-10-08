@@ -43,3 +43,11 @@ test("received samples are moved into the controller's clock, keeping their spac
 	t.receive(8, []);
 	assert.equal(t.last(8), undefined);
 });
+
+test("meanMs windows on the instance's newest sample, so a late report still has its minute (C15)", () => {
+	let now = 1_000_000;
+	const t = new Telemetry(() => now);
+	t.add(7, [1, 2, 3, 4, 5, 6].map(i => ({ at: now - (6 - i) * 10_000, ups: 60, ms: i })));
+	now += 70_000;
+	assert.equal(t.meanMs(7), 3.5);
+});

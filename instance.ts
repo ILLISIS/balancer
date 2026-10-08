@@ -14,8 +14,9 @@ export default async function loadInstancePlugin(context: InstancePluginContext)
 	let pending: Sample[] = [];
 
 	const read = async (): Promise<Reading | undefined> => {
-		const tick = Number((await instance.sendRcon("/sc rcon.print(game.tick)")).trim());
-		if (!Number.isInteger(tick)) {
+		const reply = (await instance.sendRcon("/sc rcon.print(game.tick)")).trim();
+		const tick = Number(reply);
+		if (!/^\d+$/.test(reply)) {
 			return undefined; // e.g. Factorio's one-time achievements warning before a save's first Lua command
 		}
 		const pid = instance.server.pid;
