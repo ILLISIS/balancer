@@ -3,9 +3,10 @@ import * as path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import * as lib from "@clusterio/lib";
 import type { ControllerPluginContext } from "@clusterio/controller";
-import { lifecycle } from "universal_edges/runtime";
+import { lifecycle, rateLimited } from "universal_edges/runtime";
 import { setBalancerApi } from "./api.js";
 import { MoveRequest, PreflightRequest, StatusRequest, TelemetryEvent, type Status } from "./contracts.js";
+import { RETRY_FAILED_MS, failovers, goneHosts, wasRunningBefore } from "./failover.js";
 import { Mover, type MoverPort } from "./mover.js";
 import { openState } from "./state.js";
 import { SaveStore, copyable } from "./store.js";
@@ -216,6 +217,7 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 	// Not at load: hosts connect after the plugins load, so those pulls would all fail. The host-back hook feeds them.
 
 	let resumed = false;
+	const announced = new Set<number>();
 	controller.hooks.hostConnectionEvent.attach(plugin.name, async (connection, event) => {
 		const id = connection.id;
 		if (event === "drop" || event === "close") {
@@ -224,6 +226,7 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 				lifecycle(logger, "balancer.host", "gone", { host: id, event }, "warn");
 			}
 		} else if (gone.delete(id)) {
+			announced.delete(id);
 			lifecycle(logger, "balancer.host", "back", { host: id, event });
 			// C28: a reconnected host's saves don't re-fire the update, and at start every host counts as gone.
 			store.updated([...controller.saves.values()].filter(
@@ -235,12 +238,50 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 		}
 	});
 
+	// §5.3: an instance running when its host went is started on the target; a stopped one is only reassigned. Its
+	// status turns "unknown" when the host's session closes; any real status after that clears it.
+	controller.hooks.instanceStatusChanged.attach(plugin.name, async (inst, prev) => {
+		const i = state.wasRunning.indexOf(inst.id);
+		if (inst.status === "unknown" && (prev === "running" || prev === "starting") && i === -1) {
+			state.wasRunning.push(inst.id);
+			await persist();
+		} else if (inst.status !== "unknown" && i !== -1) {
+			state.wasRunning.splice(i, 1);
+			await persist();
+		}
+	});
+	const warn = rateLimited(logger, 600_000);
+	/** §5.3: every gone host's instances move with their stored copies; candidates are pre-flighted one at a time. */
+	const failover = () => {
+		const now = Date.now();
+		const graceMs = config.get("balancer.failover_grace_minutes") * 60_000;
+		const ids = goneHosts(gone, now, graceMs, port.hostConnected);
+		for (const id of ids.filter(h => !announced.has(h))) {
+			announced.add(id);
+			lifecycle(logger, "balancer.failover", "gone", { host: id, since: gone.get(id) }, "warn");
+		}
+		const failedLately = (id: number) => state.moves.some(m => m.instanceId === id && m.reason === "failover"
+			&& m.step === "failed" && now - (m.endedAt ?? 0) < RETRY_FAILED_MS);
+		const { move, noCopy } = failovers(ids, tiles(), id => moves.moving(id) || failedLately(id), port.hasCopy);
+		for (const f of move) {
+			const wasRunning = wasRunningBefore(f.instanceId, state.wasRunning, state.moves);
+			moves.add({ instanceId: f.instanceId, from: f.from, reason: "failover", wasRunning });
+		}
+		for (const id of noCopy) {
+			const fields = { op: "balancer.failover", phase: "no_copy", instance: id };
+			warn(`no_copy:${id}`, "balancer.failover no_copy: no stored copy, so it stays on its gone host", fields);
+		}
+	};
+
 	// §4.3 unit 3, every 30 s. The first pass resumes the moves a restart interrupted, once the hosts have had time to
 	// reconnect (plan ruling 15).
 	const pass = () => {
 		if (!resumed) {
 			resumed = true;
 			moves.resume();
+		}
+		if (config.get("balancer.enabled")) {
+			failover();
 		}
 		moves.pump();
 	};
