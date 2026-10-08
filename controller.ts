@@ -311,8 +311,8 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 			lifecycle(logger, "balancer.benchmark", "reference", { instance: pick.id, ms_per_tick: ms(pick.id) });
 		}
 		const { instanceId, modPackId, version } = state.reference;
-		const modPack = modPackId === null ? undefined : controller.modPacks.get(modPackId);
-		if (!modPack) {
+		const modPack = modPackId === null ? null : controller.modPacks.get(modPackId);
+		if (modPack === undefined) {
 			throw new Error(`the reference's mod pack ${modPackId} no longer exists`);
 		}
 		return { file: referenceFile, modPack, version, key: `tile:${instanceId}` };
@@ -388,10 +388,16 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 		if (benchmarking.has(request.hostId)) {
 			throw new lib.RequestError(`host ${request.hostId} is running its benchmark already`);
 		}
-		if (!await reference()) {
-			throw new lib.RequestError(
-				"no reference save yet: set balancer.reference_save, or wait until a tile is busy",
-			);
+		benchmarking.add(request.hostId); // claimed before any await, so no second run can start meanwhile
+		try {
+			if (!await reference()) {
+				throw new lib.RequestError(
+					"no reference save yet: set balancer.reference_save, or wait until a tile is busy",
+				);
+			}
+		} catch (err) {
+			benchmarking.delete(request.hostId);
+			throw err;
 		}
 		void runBenchmark(request.hostId, true);
 	});
