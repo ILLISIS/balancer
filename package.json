@@ -1,0 +1,37 @@
+{
+	"name": "balancer",
+	"version": "1.0.0",
+	"description": "Balancer: moves empty tiles between hosts with their saves, fails over gone hosts, fences cut-off ones",
+	"private": true,
+	"type": "module",
+	"main": "dist/node/index.js",
+	"exports": {
+		".": "./dist/node/index.js",
+		"./api": "./dist/node/api.js"
+	},
+	"engines": { "node": ">=22" },
+	"peerDependencies": {
+		"@clusterio/controller": "workspace:^",
+		"@clusterio/host": "workspace:^",
+		"@clusterio/lib": "workspace:^"
+	},
+	"dependencies": {
+		"@sinclair/typebox": "catalog:",
+		"universal_edges": "workspace:*"
+	},
+	"devDependencies": {
+		"@clusterio/controller": "workspace:^",
+		"@clusterio/host": "workspace:^",
+		"@clusterio/lib": "workspace:^",
+		"@clusterio/web_ui": "workspace:^",
+		"@types/node": "catalog:",
+		"@types/react": "catalog:",
+		"antd": "catalog:",
+		"react": "catalog:",
+		"react-dom": "catalog:",
+		"typescript": "catalog:",
+		"webpack": "catalog:",
+		"webpack-cli": "catalog:",
+		"webpack-merge": "catalog:"
+	}
+}
