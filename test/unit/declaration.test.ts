@@ -78,3 +78,9 @@ test("balancerApi() throws until the controller plugin sets it: the edgeApi patt
 	assert.equal(balancerApi(), api);
 	setBalancerApi(undefined);
 });
+
+test("the web page is declared and its bundle's manifest is built (§11)", async () => {
+	assert.equal(plugin.webEntrypoint, "./web");
+	assert.deepEqual(plugin.routes, ["/balancer"]);
+	await access(join(pluginRoot, "dist", "web", "manifest.json"));
+});

@@ -32,6 +32,8 @@ export const plugin: lib.PluginDeclaration = {
 	hostEntrypoint: "dist/node/host.js",
 	instanceEntrypoint: "dist/node/instance.js",
 	ctlEntrypoint: "dist/node/ctl.js",
+	webEntrypoint: "./web",
+	routes: ["/balancer"],
 	// The instance plugin reads game.tick with /sc (§4.1).
 	features: ["ScriptCommands"],
 	controllerConfigFields: {
