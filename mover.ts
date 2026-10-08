@@ -110,7 +110,10 @@ export class Mover {
 		const grace = this.port.now() - this.loadedAt >= this.config().graceMs;
 		for (const m of this.moves.filter(x => !ended(x) && x.step !== "queued" && !this.active.has(x))) {
 			const host = m.step === "stop" || m.step === "pull" ? m.from : m.to;
-			if (grace || host === null || this.port.hostConnected(host)) {
+			// A stop also waits for the host's instance list: at connect T's status is still "unknown" (C43).
+			const ready = host === null || (this.port.hostConnected(host)
+				&& (m.step !== "stop" || this.port.status(m.instanceId) !== "unknown"));
+			if (grace || ready) {
 				this.port.log("resumed", m);
 				this.run(m);
 			}

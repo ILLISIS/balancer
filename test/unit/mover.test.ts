@@ -396,6 +396,21 @@ test("a stop or pull step waits for the source host instead (C43)", async () => 
 	assert.equal(f.calls[0], "pull 7 world.zip");
 });
 
+test("a stop step also waits until its tile's status is known (C43)", async () => {
+	const f = fake();
+	f.status.set(7, "unknown");
+	f.moves.push({ ...assignMove(), step: "stop" });
+	f.mover.resume();
+	await settle();
+	f.mover.pump();
+	await settle();
+	assert.deepEqual(f.calls, []);
+	f.status.set(7, "stopped");
+	f.mover.pump();
+	await settle();
+	assert.equal(f.calls[0], "pull 7 world.zip");
+});
+
 test("after the grace a waiting move runs anyway, into its usual failure path (C43)", async () => {
 	const f = fake();
 	f.hosts.set(2, false);

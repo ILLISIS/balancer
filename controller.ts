@@ -144,16 +144,22 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 		// §5.2 step 4: in-process, not a message to itself (link.ts:556 refuses that; spec §2).
 		assign: async (id, hostId) => {
 			await controller.instances.assignInstance(id, hostId);
-			store.hostChanged(id); // C49: every move and failover assigns here
-			await persist();
 		},
-		push: id => push(controller, id, store.file(id), MOVE_SAVE),
+		push: async id => {
+			const name = await push(controller, id, store.file(id), MOVE_SAVE);
+			// C49, N1: zero only now. Until the push the host may still list an earlier stint's saves for this
+			// tile, and a re-feed would let one replace the fresh copy; after it, the pushed copy is the newest.
+			store.hostChanged(id);
+			await persist();
+			return name;
+		},
 		start: async (id, name) => {
 			await controller.sendTo({ instanceId: id }, new lib.InstanceStartRequest(name));
 		},
 		save: persist,
 		log: (phase, m, fields = {}, level = "info") => {
-			const mtime = store.copy(m.instanceId)?.mtimeMs;
+			const c = store.copy(m.instanceId);
+			const mtime = c && (c.mtimeMs || c.pulledAt); // N2: mtime is 0 until the new host's first save
 			// C53: a failover rolls the tile back to its copy; say how far.
 			const age = phase === "queued" && m.reason === "failover" && mtime !== undefined
 				? { copyAgeMinutes: Math.round((Date.now() - mtime) / 60_000) } : {};
@@ -235,7 +241,8 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 			ups: telemetry.last(i.id)?.ups ?? null,
 			ms: telemetry.meanMs(i.id) ?? null,
 			players: players(i.id),
-			copyMtimeMs: store.copy(i.id)?.mtimeMs ?? null,
+			// N2: pulledAt while mtime is 0
+			copyMtimeMs: store.copy(i.id)?.mtimeMs || store.copy(i.id)?.pulledAt || null,
 		})),
 		moves: state.moves,
 	}));
