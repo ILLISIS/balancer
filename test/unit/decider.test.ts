@@ -77,6 +77,10 @@ test("drain (§5.4, R12): one at a time per host; occupied tiles wait, failed on
 	assert.deepEqual(drainMoves(v).map(a => a.instanceId), [13], "12 failed a minute ago: the next one goes");
 	v.moves[0].endedAt = NOW - 11 * MIN;
 	assert.deepEqual(drainMoves(v).map(a => a.instanceId), [12], "and 12 is tried again after 10 minutes");
+	v.moves[0] = move({ instanceId: 12, reason: "drain", back: true, endedAt: NOW - MIN });
+	assert.deepEqual(drainMoves(v).map(a => a.instanceId), [13], "12 came back a minute ago: it waits too");
+	v.moves[0].endedAt = NOW - 11 * MIN;
+	assert.deepEqual(drainMoves(v).map(a => a.instanceId), [12]);
 	v.connected = [2, 3];
 	assert.deepEqual(drainMoves(v), [], "a disconnected draining host waits (failover's, after the grace)");
 });
@@ -94,6 +98,10 @@ test("overload (§5.5): a lagging host moves its heaviest empty tile, once per h
 	assert.deepEqual(overloadMoves(v).add, [], "host 1's last overload move began 9 minutes ago");
 	v.moves[0].startedAt = NOW - 10 * MIN;
 	assert.deepEqual(overloadMoves(v).add.map(a => a.instanceId), [12]);
+	v.moves[0].step = "pull";
+	v.moves[0].endedAt = null;
+	assert.deepEqual(overloadMoves(v).add, [], "an unfinished overload move older than 10 minutes still blocks");
+	v.moves.pop();
 	v.benchmarking.add(1);
 	assert.deepEqual(overloadMoves(v).add, [], "a benchmarking host's lag is the benchmark's (R11)");
 });

@@ -343,6 +343,7 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 					delete host.learned;
 				}
 				state.hosts[hostId] = host;
+				benchFailed.delete(hostId);
 				lifecycle(logger, "balancer.benchmark", "done", {
 					host: hostId, speed: r.speed, slots: r.slots, cores: r.cores, runs: r.runs,
 					wall_ms: Date.now() - started,

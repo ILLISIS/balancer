@@ -30,7 +30,7 @@ export type Decision = { rule: Move["reason"] | null; add: Add[]; beyond: { host
 
 const moving = (v: View, id: number) => v.moves.some(m => m.instanceId === id && !ended(m));
 const failedLately = (v: View, id: number, reason: Move["reason"]) => v.moves.some(m => m.instanceId === id
-	&& m.reason === reason && m.step === "failed" && v.now - (m.endedAt ?? 0) < RETRY_FAILED_MS);
+	&& m.reason === reason && (m.step === "failed" || m.back) && v.now - (m.endedAt ?? 0) < RETRY_FAILED_MS);
 
 /**
  * §4.3 unit 3, R1: the first rule with work takes the pass: failover (its moves found by the controller), drain,
@@ -107,7 +107,8 @@ export function overloadMoves(v: View): { add: Add[]; beyond: { host: number; in
 			beyond.push({ host: h, instance: busy[0].id });
 			continue;
 		}
-		if (v.moves.some(m => m.reason === "overload" && m.from === h && v.now - m.startedAt < OVERLOAD_EVERY_MS)) {
+		if (v.moves.some(m => m.reason === "overload" && m.from === h
+			&& (!ended(m) || v.now - m.startedAt < OVERLOAD_EVERY_MS))) {
 			continue;
 		}
 		const [heaviest] = running.filter(t => t.players === 0 && t.hasCopy && !moving(v, t.id))
