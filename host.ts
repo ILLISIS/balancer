@@ -4,13 +4,13 @@ import * as path from "node:path";
 import * as lib from "@clusterio/lib";
 import type { HostPluginContext } from "@clusterio/host";
 import { lifecycle } from "universal_edges/runtime";
-import { HostLeavingEvent, PreflightRequest } from "./contracts.js";
+import { FactorioVersionEvent, HostBenchmarkRequest, HostLeavingEvent, PreflightRequest } from "./contracts.js";
 import { Fence, fenceEvent, stopLive } from "./fence.js";
 import { local } from "./local.js";
-import { benchmark, factorioInstall, modsDir } from "./preflight.js";
+import { benchmark, factorioInstall, joinBenchmark, modsDir } from "./preflight.js";
 import { SAMPLE_MS } from "./telemetry.js";
 
-/** The host plugin (§4.2): the fence (§7) and the pre-flight (§5.2 step 1). */
+/** The host plugin (§4.2): the fence (§7), the pre-flight (§5.2 step 1) and the join benchmark (§5.7). */
 export default async function loadHostPlugin(context: HostPluginContext) {
 	const { host, logger, plugin } = context;
 
@@ -21,9 +21,28 @@ export default async function loadHostPlugin(context: HostPluginContext) {
 		lifecycle(logger, "balancer.fence", "fired", { instances: live.map(i => i.id) }, "warn");
 		stopLive(live, (phase, fields, level) => lifecycle(logger, "balancer.fence", phase, fields, level));
 	});
+	const factorioDir = () => path.resolve(host.config.get("host.factorio_directory"));
 	host.hooks.controllerConnectionEvent.attach(plugin.name, async event => {
 		fence.event(fenceEvent(event, host._shuttingDown));
+		if (event === "connect") {
+			// §5.7, R8: the controller benchmarks this host again when its Factorio changes.
+			factorioInstall(factorioDir(), "latest").then(f => host.send(new FactorioVersionEvent(f.version))).catch(
+				(err: Error) => logger.warn(`balancer: the Factorio version was not reported: ${err.message}`),
+			);
+		}
 	});
+
+	/** The stream's save into `dir`, its mods dir (none for a null pack: P5), and Factorio `version`'s install. */
+	const prepare = async (dir: string, streamId: string, modPack: lib.ModPack | null, version: string) => {
+		const url = new URL(host.config.get("host.controller_url"));
+		url.pathname += `api/stream/${streamId}`;
+		const save = path.join(dir, "save.zip");
+		await lib.downloadFile(url, save, "overwrite");
+		const mods = path.join(dir, "mods");
+		await (modPack ? modsDir(host, modPack, mods) : fs.mkdir(mods));
+		const { bin, data } = await factorioInstall(factorioDir(), version);
+		return { bin, data, mods, save };
+	};
 
 	// §5.3: a clean shutdown stops the instances before it disconnects; say which were running first (C34).
 	host.hooks.shutdown.attach(plugin.name, async () => {
@@ -46,15 +65,8 @@ export default async function loadHostPlugin(context: HostPluginContext) {
 		local.preflights += 1; // this host's instances report every sample until it ends (§4.1)
 		const started = Date.now();
 		try {
-			const url = new URL(host.config.get("host.controller_url"));
-			url.pathname += `api/stream/${request.streamId}`;
-			const save = path.join(dir, "save.zip");
-			await lib.downloadFile(url, save, "overwrite");
-			const mods = path.join(dir, "mods");
-			await modsDir(host, request.modPack, mods);
-			const factorioDir = path.resolve(host.config.get("host.factorio_directory"));
-			const { bin, data } = await factorioInstall(factorioDir, request.factorioVersion);
-			const msPerTick = await benchmark({ bin, data, mods, save, ticks: request.ticks, dir });
+			const run = await prepare(dir, request.streamId, request.modPack, request.factorioVersion);
+			const msPerTick = await benchmark({ ...run, ticks: request.ticks, dir });
 			const wallMs = Date.now() - started;
 			const fields = { instance: request.instanceId, ms_per_tick: msPerTick, wall_ms: wallMs };
 			lifecycle(logger, "balancer.preflight", "ran", fields);
@@ -64,6 +76,23 @@ export default async function loadHostPlugin(context: HostPluginContext) {
 			setTimeout(() => {
 				local.preflights -= 1;
 			}, SAMPLE_MS + 5_000).unref();
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	// §5.7: the join benchmark on the controller's reference save (P5), with its mod pack or none. The save is streamed
+	// to this host per run (M11).
+	host.handle(HostBenchmarkRequest, async (request: HostBenchmarkRequest) => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "balancer-benchmark-"));
+		const started = Date.now();
+		try {
+			const run = await prepare(dir, request.streamId, request.modPack, request.factorioVersion);
+			const cores = os.availableParallelism();
+			const r = await joinBenchmark(run, path.join(dir, "runs"), cores);
+			const fields = { speed: r.speed, slots: r.slots, cores, runs: r.runs, wall_ms: Date.now() - started };
+			lifecycle(logger, "balancer.benchmark", "ran", fields);
+			return { ...r, cores };
+		} finally {
 			await fs.rm(dir, { recursive: true, force: true });
 		}
 	});

@@ -2,10 +2,10 @@ import { after, test } from "node:test";
 import assert from "node:assert/strict";
 import { chmod, mkdir, mkdtemp, readFile, readlink, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import * as lib from "@clusterio/lib";
 import type { Host } from "@clusterio/host";
-import { benchmark, factorioInstall, modsDir, parseAvg } from "../../preflight.js";
+import { benchmark, factorioInstall, joinBenchmark, modsDir, parseAvg, type Bench } from "../../preflight.js";
 
 const dirs: string[] = [];
 const temp = async () => {
@@ -28,7 +28,7 @@ test("factorioInstall finds a version in a folder of versions, the latest, or a 
 		await writeFile(join(dir, v, "data", "base", "info.json"), JSON.stringify({ version: v }));
 	}
 	assert.deepEqual(await factorioInstall(dir, "2.1.20"), {
-		data: join(dir, "2.1.20", "data"), bin: join(dir, "2.1.20", "bin", "x64", "factorio"),
+		data: join(dir, "2.1.20", "data"), bin: join(dir, "2.1.20", "bin", "x64", "factorio"), version: "2.1.20",
 	});
 	assert.equal((await factorioInstall(dir, "latest")).data, join(dir, "2.1.21", "data"));
 	assert.equal((await factorioInstall(join(dir, "2.1.21"), "latest")).data, join(dir, "2.1.21", "data"));
@@ -89,4 +89,27 @@ test("a benchmark that exits non-zero, or prints no avg line, rejects with Facto
 	await assert.rejects(benchmark(b), /exited 1: .*Failed to load mods/);
 	const silent = await fakeFactorio(dir, "echo Goodbye");
 	await assert.rejects(benchmark({ ...b, bin: silent }), /exited 0 with no avg line/);
+});
+
+test("the join benchmark (§5.7, R6): a probe sets the ticks; copies up to the cores; slots within 1.25×", async () => {
+	const dir = await temp();
+	const runs: Bench[] = [];
+	// One copy's ms per tick at each count, as a multiple of a single copy's 0.5 ms.
+	const slower: Record<string, number> = { probe: 1, 1: 1, 2: 1.2, 4: 1.3, 8: 2 };
+	const run = async (b: Bench) => {
+		runs.push(b);
+		return 0.5 * slower[basename(b.dir).split("-")[0]];
+	};
+	const b = { bin: "/f", data: "/d", mods: "/m", save: "/s.zip" };
+	assert.deepEqual(await joinBenchmark(b, dir, 32, run), {
+		speed: 0.5,
+		slots: 2,
+		runs: [{ copies: 1, msPerTick: 0.5 }, { copies: 2, msPerTick: 0.6 }, { copies: 4, msPerTick: 0.65 }],
+	});
+	assert.deepEqual(runs.map(r => r.ticks), [1800, 60_000, 60_000, 60_000, 60_000, 60_000, 60_000, 60_000],
+		"30 s at 0.5 ms; 4 is beyond 1.25×, so 8 never runs");
+	assert.equal(new Set(runs.map(r => r.dir)).size, 8, "each copy in its own folder");
+	runs.length = 0;
+	assert.equal((await joinBenchmark(b, dir, 3, run)).slots, 2);
+	assert.deepEqual(runs.map(r => basename(r.dir)), ["probe", "1-0", "2-0", "2-1"], "stops at the core count");
 });
