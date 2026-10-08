@@ -120,9 +120,15 @@ export async function joinBenchmark(
 	const ticks = Math.max(1800, Math.round(RUN_MS / Math.max(probe, 0.01)));
 	const runs: { copies: number; msPerTick: number }[] = [];
 	for (const copies of COPIES.filter(n => n <= cores)) {
-		const avgs = await Promise.all(Array.from({ length: copies }, (_, i) => (
+		// Every copy finishes before one's failure is rethrown, so the caller's cleanup never runs under a live child.
+		const settled = await Promise.allSettled(Array.from({ length: copies }, (_, i) => (
 			run({ ...b, ticks, dir: path.join(dir, `${copies}-${i}`) })
 		)));
+		const failed = settled.find((r): r is PromiseRejectedResult => r.status === "rejected");
+		if (failed) {
+			throw failed.reason;
+		}
+		const avgs = settled.map(r => (r as PromiseFulfilledResult<number>).value);
 		const msPerTick = Math.max(...avgs);
 		runs.push({ copies, msPerTick });
 		if (msPerTick > runs[0].msPerTick * WITHIN) {

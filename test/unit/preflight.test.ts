@@ -113,3 +113,22 @@ test("the join benchmark (§5.7, R6): a probe sets the ticks; copies up to the c
 	assert.equal((await joinBenchmark(b, dir, 3, run)).slots, 2);
 	assert.deepEqual(runs.map(r => basename(r.dir)), ["probe", "1-0", "2-0", "2-1"], "stops at the core count");
 });
+
+test("a failing copy doesn't end the join benchmark until its siblings have finished", async () => {
+	const dir = await temp();
+	let live = 0;
+	const run = async (b: Bench) => {
+		if (basename(b.dir) === "probe") {
+			return 0.5;
+		}
+		live += 1;
+		await new Promise(resolve => setTimeout(resolve, basename(b.dir).endsWith("-0") ? 0 : 20));
+		live -= 1;
+		if (basename(b.dir) === "2-0") {
+			throw new Error("boom");
+		}
+		return 0.5;
+	};
+	await assert.rejects(joinBenchmark({ bin: "/f", data: "/d", mods: "/m", save: "/s.zip" }, dir, 4, run), /boom/);
+	assert.equal(live, 0, "no copy is still running when it rejects");
+});
