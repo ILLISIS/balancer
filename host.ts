@@ -5,7 +5,7 @@ import * as lib from "@clusterio/lib";
 import type { HostPluginContext } from "@clusterio/host";
 import { lifecycle } from "universal_edges/runtime";
 import { PreflightRequest } from "./contracts.js";
-import { Fence } from "./fence.js";
+import { Fence, fenceEvent } from "./fence.js";
 import { local } from "./local.js";
 import { benchmark, factorioInstall, modsDir } from "./preflight.js";
 import { SAMPLE_MS } from "./telemetry.js";
@@ -30,7 +30,7 @@ export default async function loadHostPlugin(context: HostPluginContext) {
 		}
 	});
 	host.hooks.controllerConnectionEvent.attach(plugin.name, async event => {
-		fence.event(event);
+		fence.event(fenceEvent(event, host._shuttingDown));
 	});
 
 	// §5.2 step 1: benchmark the controller's copy of a tile here, next to this host's running tiles.

@@ -1,13 +1,19 @@
-import { test } from "node:test";
+import { after, test } from "node:test";
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, readFile, readlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readlink, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as lib from "@clusterio/lib";
 import type { Host } from "@clusterio/host";
 import { benchmark, factorioInstall, modsDir, parseAvg } from "../../preflight.js";
 
-const temp = () => mkdtemp(join(tmpdir(), "balancer-preflight-"));
+const dirs: string[] = [];
+const temp = async () => {
+	const dir = await mkdtemp(join(tmpdir(), "balancer-preflight-"));
+	dirs.push(dir);
+	return dir;
+};
+after(() => Promise.all(dirs.map(dir => rm(dir, { recursive: true, force: true }))));
 
 test("parseAvg reads Factorio's benchmark summary line", () => {
 	const out = "  Performed 1800 updates in 788.731 ms\n  avg: 0.438 ms, min: 0.202 ms, max: 1.910 ms\n";

@@ -6,7 +6,7 @@ import type { Host } from "@clusterio/host";
 
 /** Factorio's benchmark summary: "avg: 0.438 ms, min: …" (spike 32). */
 export function parseAvg(output: string): number | undefined {
-	const m = /avg: ([\d.]+) ms/.exec(output);
+	const m = /avg: (\d+(?:\.\d+)?) ms/.exec(output);
 	return m ? Number(m[1]) : undefined;
 }
 
