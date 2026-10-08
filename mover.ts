@@ -20,6 +20,8 @@ export type MoverPort = {
 	preflight(instanceId: number, hostId: number): Promise<PreflightResult>;
 	tick(instanceId: number): Promise<number>;
 	stop(instanceId: number): Promise<void>;
+	/** Stop without saving: a stop would write the bad-tick game over the fresh copy (C27). */
+	kill(instanceId: number): Promise<void>;
 	/** Into the store: the copy becomes this save. */
 	pull(instanceId: number, save: string): Promise<void>;
 	assign(instanceId: number, hostId: number): Promise<void>;
@@ -271,8 +273,8 @@ export class Mover {
 			if (m.tick !== null) {
 				const tick = await this.port.tick(id);
 				if (tick < m.tick) {
-					// C23: stopped, so the retry's start loads the re-pushed copy.
-					await this.port.stop(id);
+					// C23/C27: killed (no save), so the retry's start loads the re-pushed copy.
+					await this.port.kill(id);
 					throw new Error(`it loaded tick ${tick}, before the saved ${m.tick}`);
 				}
 			}

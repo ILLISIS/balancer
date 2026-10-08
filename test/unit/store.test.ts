@@ -111,3 +111,32 @@ test("a direct pull drops the older save queued for the same instance (C24)", as
 	await settle();
 	assert.deepEqual(pulls.map(p => p.name), ["a.zip", "stopped.zip"]);
 });
+
+test("a direct pull drops the older queued save at once, though that instance is pulling (C24a)", async () => {
+	const { state, store, pulls } = fakeStore(2);
+	store.updated([save(7, "A1.zip", 100), save(8, "b.zip", 100)]);
+	await settle();
+	store.updated([save(7, "A2.zip", 200)]);
+	void store.pull(7, "stopped.zip");
+	pulls[1].resolve(); // b ends first: the pump must find nothing queued for 7
+	await settle();
+	pulls[0].resolve();
+	await settle();
+	pulls[2]?.resolve();
+	await settle();
+	assert.deepEqual(pulls.map(p => p.name), ["A1.zip", "b.zip", "stopped.zip"]);
+	assert.equal(state.copies[7].name, "stopped.zip");
+});
+
+test("a pump pull behind an earlier one keeps a newer queued save (C24b)", async () => {
+	const { state, store, pulls } = fakeStore(2);
+	store.updated([save(7, "A0.zip", 100)]);
+	await settle();
+	store.updated([save(7, "A1.zip", 200)]);
+	store.updated([save(7, "A2.zip", 300)]);
+	for (let i = 0; i < 5; i++) {
+		pulls[i]?.resolve();
+		await settle();
+	}
+	assert.equal(state.copies[7].name, "A2.zip");
+});

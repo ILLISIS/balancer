@@ -57,8 +57,9 @@ export class SaveStore {
 
 	/** Pull `name` now, after any pull of this instance in flight (the mover's step 3); rejects when it fails. */
 	pull(instanceId: number, name: string, mtimeMs = this.port.now(), size = 0): Promise<void> {
+		// Nothing newer than a direct pull's save can exist, so an older queued one is stale (the pump's own: no-op).
+		this.waiting.delete(instanceId);
 		const run = async () => {
-			this.waiting.delete(instanceId); // nothing newer than this save can exist, so an older queued one is stale
 			await this.port.pull(instanceId, name, this.file(instanceId));
 			this.state.copies[instanceId] = { name, mtimeMs, size, pulledAt: this.port.now() };
 			await this.port.save();

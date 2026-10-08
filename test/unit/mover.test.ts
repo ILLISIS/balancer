@@ -72,6 +72,10 @@ function fake(config: Partial<MoverConfig> = {}) {
 			}
 			call(`stop ${id}`);
 		},
+		kill: async id => {
+			call(`kill ${id}`);
+			status.set(id, "stopped");
+		},
 		pull: async (id, save) => {
 			call(`pull ${id} ${save}`);
 		},
@@ -315,7 +319,7 @@ test("retries exhausted with the status unknown: no second copy on the source; t
 	assert.deepEqual([m.step, m.back, m.to, m.error], ["failed", false, 2, "connection lost"]);
 });
 
-test("a start that loads an older tick stops T, and the retry starts it again (C23)", async () => {
+test("a start that loads an older tick kills T, and the retry starts it again (C23)", async () => {
 	const f = fake();
 	let reads = 0;
 	f.port.tick = async id => {
@@ -326,7 +330,7 @@ test("a start that loads an older tick stops T, and the retry starts it again (C
 	const m = f.mover.add({ instanceId: 7, ...manual });
 	await settle();
 	assert.deepEqual(f.calls.slice(-8), [
-		"push 7", "start 7 balancer.zip", "tick 7", "stop 7", "assign 7 2", "push 7", "start 7 balancer.zip", "tick 7",
+		"push 7", "start 7 balancer.zip", "tick 7", "kill 7", "assign 7 2", "push 7", "start 7 balancer.zip", "tick 7",
 	]);
 	assert.deepEqual([m.step, m.failures], ["done", 1]);
 });
