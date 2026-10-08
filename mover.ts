@@ -1,7 +1,7 @@
 import type { Move } from "./contracts.js";
 
 export type PreflightResult = { pass: boolean; msPerTick: number | null; minUps: number | null };
-export type MoverConfig = { maxConcurrent: number; badPairHours: number };
+export type MoverConfig = { maxConcurrent: number; badPairHours: number; graceMs: number };
 
 /** What the mover needs from Clusterio: controller.ts implements it (Task 6), the tests fake it. */
 export type MoverPort = {
@@ -16,7 +16,7 @@ export type MoverPort = {
 	/** The save the running instance loaded, which its stop writes; else its newest file save. */
 	loadedSave(instanceId: number): string | undefined;
 	hasCopy(instanceId: number): boolean;
-	/** §5.2 step 1 on the instance's stored copy; may throw, which counts as a failed pre-flight. */
+	/** §5.2 step 1 on the instance's stored copy; may throw: the next target is tried, no pair marked bad (C46). */
 	preflight(instanceId: number, hostId: number): Promise<PreflightResult>;
 	tick(instanceId: number): Promise<number>;
 	stop(instanceId: number): Promise<void>;
@@ -48,13 +48,18 @@ const ended = (m: Move) => m.step === "done" || m.step === "failed";
  */
 export class Mover {
 	private active = new Set<Move>();
+	/** Nothing starts before resume(): the interrupted moves count against the limits first (C47). */
+	private resumed = false;
+	private loadedAt: number;
 
 	constructor(
 		private moves: Move[],
 		private bad: Record<string, number>,
 		private port: MoverPort,
 		private config: () => MoverConfig,
-	) { }
+	) {
+		this.loadedAt = port.now();
+	}
 
 	/** A move of the instance is queued or in progress (§4.5). */
 	moving(instanceId: number): boolean {
@@ -91,17 +96,33 @@ export class Mover {
 		return m;
 	}
 
-	/** Continue every move that was in progress at the last stop, from its persisted step (§5.2). */
+	/** Allow moves to start: the interrupted ones continue, the queued ones follow. Safe to call on every pass. */
 	resume(): void {
-		for (const m of this.moves.filter(x => !ended(x) && x.step !== "queued")) {
-			this.port.log("resumed", m);
-			this.run(m);
-		}
+		this.resumed = true;
 		this.pump();
+	}
+
+	/**
+	 * Continue every move that was in progress at the last stop, from its persisted step (§5.2), once the host its step
+	 * talks to is connected (C43); after the failover grace the rest go anyway and fail into their usual path.
+	 */
+	private resumeWaiting(): void {
+		const grace = this.port.now() - this.loadedAt >= this.config().graceMs;
+		for (const m of this.moves.filter(x => !ended(x) && x.step !== "queued" && !this.active.has(x))) {
+			const host = m.step === "stop" || m.step === "pull" ? m.from : m.to;
+			if (grace || host === null || this.port.hostConnected(host)) {
+				this.port.log("resumed", m);
+				this.run(m);
+			}
+		}
 	}
 
 	/** Start the queued moves the limits allow; called after each move ends and by the controller's 30 s pass. */
 	pump(): void {
+		if (!this.resumed) {
+			return;
+		}
+		this.resumeWaiting();
 		for (const m of this.moves.filter(x => x.step === "queued")) {
 			if (this.active.size >= this.config().maxConcurrent) {
 				return;
@@ -195,16 +216,17 @@ export class Mover {
 		}
 		await this.port.save();
 		this.port.log("preflight", m);
-		let r: PreflightResult;
+		let r: PreflightResult | undefined;
 		try {
 			r = await this.port.preflight(id, to);
 		} catch (err: any) {
 			this.port.log("preflight_error", m, { error: err.message }, "warn");
-			r = { pass: false, msPerTick: null, minUps: null };
 		}
-		const fields = { ms_per_tick: r.msPerTick, min_ups: r.minUps };
-		if (!r.pass) {
-			this.bad[`${id}:${to}`] = this.port.now() + this.config().badPairHours * 3_600_000;
+		const fields = { ms_per_tick: r?.msPerTick ?? null, min_ups: r?.minUps ?? null };
+		if (!r?.pass) {
+			if (r) { // C46: an error is no verdict; only a measured fail marks the pair bad
+				this.bad[`${id}:${to}`] = this.port.now() + this.config().badPairHours * 3_600_000;
+			}
 			this.port.log("preflight_failed", m, fields, "warn");
 			if (m.pinned) {
 				return this.end(m, "failed", `pre-flight failed on host ${to}`);

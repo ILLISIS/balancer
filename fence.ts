@@ -34,3 +34,22 @@ export class Fence {
 		return this.timer !== undefined;
 	}
 }
+
+/** The fire step (§7): stop each live tile; if its stop rejects, kill it (C50), since a second live copy is worse. */
+export function stopLive(
+	instances: { id: number; stop(): Promise<unknown>; kill(): Promise<unknown> }[],
+	log: (phase: string, fields: Record<string, unknown>, level: "warn" | "error") => void,
+): void {
+	for (const i of instances) {
+		i.stop().then(
+			() => log("stopped", { instance: i.id }, "warn"),
+			(err: Error) => {
+				log("stop_failed", { instance: i.id, error: err.message }, "error");
+				i.kill().then(
+					() => log("killed", { instance: i.id }, "warn"),
+					(e: Error) => log("kill_failed", { instance: i.id, error: e.message }, "error"),
+				);
+			},
+		);
+	}
+}

@@ -8,7 +8,7 @@ import { setBalancerApi } from "./api.js";
 import {
 	HostLeavingEvent, MoveRequest, PreflightRequest, StatusRequest, TelemetryEvent, type Status,
 } from "./contracts.js";
-import { RETRY_FAILED_MS, failovers, forget, goneHosts, wasRunningBefore } from "./failover.js";
+import { RETRY_FAILED_MS, adoptOrphans, failovers, forget, goneHosts, wasRunningBefore } from "./failover.js";
 import { Mover, type MoverPort } from "./mover.js";
 import { openState } from "./state.js";
 import { SaveStore, copyable } from "./store.js";
@@ -58,9 +58,11 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 
 	/** When the balancer saw each disconnected host go (drop or close); a host down at start counts from now. */
 	const gone = new Map<number, number>();
+	// C51: performance.now(), so a wall-clock step can't make a host look gone before its fence fires.
+	const wallOf = (mono: number) => Date.now() - (performance.now() - mono);
 	for (const h of controller.hosts.values()) {
 		if (!h.connected) {
-			gone.set(h.id, Date.now());
+			gone.set(h.id, performance.now());
 		}
 	}
 
@@ -140,15 +142,25 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 		},
 		pull: (id, name) => store.pull(id, name),
 		// §5.2 step 4: in-process, not a message to itself (link.ts:556 refuses that; spec §2).
-		assign: (id, hostId) => controller.instances.assignInstance(id, hostId),
+		assign: async (id, hostId) => {
+			await controller.instances.assignInstance(id, hostId);
+			store.hostChanged(id); // C49: every move and failover assigns here
+			await persist();
+		},
 		push: id => push(controller, id, store.file(id), MOVE_SAVE),
 		start: async (id, name) => {
 			await controller.sendTo({ instanceId: id }, new lib.InstanceStartRequest(name));
 		},
 		save: persist,
-		log: (phase, m, fields = {}, level = "info") => lifecycle(logger, "balancer.move", phase, {
-			move: m.id, instance: m.instanceId, from: m.from, to: m.to, reason: m.reason, ...fields,
-		}, level),
+		log: (phase, m, fields = {}, level = "info") => {
+			const mtime = store.copy(m.instanceId)?.mtimeMs;
+			// C53: a failover rolls the tile back to its copy; say how far.
+			const age = phase === "queued" && m.reason === "failover" && mtime !== undefined
+				? { copyAgeMinutes: Math.round((Date.now() - mtime) / 60_000) } : {};
+			lifecycle(logger, "balancer.move", phase, {
+				move: m.id, instance: m.instanceId, from: m.from, to: m.to, reason: m.reason, ...age, ...fields,
+			}, level);
+		},
 		finished: m => {
 			for (const listener of listeners) {
 				try {
@@ -162,6 +174,7 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 	const moves = new Mover(state.moves, state.bad, port, () => ({
 		maxConcurrent: config.get("balancer.max_concurrent_moves"),
 		badPairHours: config.get("balancer.bad_pair_hours"),
+		graceMs: config.get("balancer.failover_grace_minutes") * 60_000,
 	}));
 	mover = moves;
 
@@ -209,7 +222,10 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 
 	controller.handle(StatusRequest, async (): Promise<Status> => ({
 		hosts: [...controller.hosts.values()].map(h => ({
-			id: h.id, name: h.name, connected: h.connected, goneSinceMs: gone.get(h.id) ?? null,
+			id: h.id,
+			name: h.name,
+			connected: h.connected,
+			goneSinceMs: gone.has(h.id) ? wallOf(gone.get(h.id)!) : null,
 		})),
 		tiles: [...controller.instances.values()].map(i => ({
 			id: i.id,
@@ -224,17 +240,16 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 		moves: state.moves,
 	}));
 
-	// §5.1: copy every newer save, and the ones the hosts listed before this start.
+	// §5.1: copy every newer save.
 	controller.saves.on("update", (saves: lib.SaveDetails[]) => store.updated(saves));
 	// Not at load: hosts connect after the plugins load, so those pulls would all fail. The host-back hook feeds them.
 
-	let resumed = false;
 	const announced = new Set<number>();
 	controller.hooks.hostConnectionEvent.attach(plugin.name, async (connection, event) => {
 		const id = connection.id;
 		if (event === "drop" || event === "close") {
 			if (!gone.has(id)) {
-				gone.set(id, Date.now());
+				gone.set(id, performance.now());
 				lifecycle(logger, "balancer.host", "gone", { host: id, event }, "warn");
 			}
 		} else if (gone.delete(id)) {
@@ -247,9 +262,7 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 			store.updated([...controller.saves.values()].filter(
 				s => instance(s.instanceId)?.config.get("instance.assigned_host") === id,
 			));
-			if (resumed) {
-				moves.pump();
-			}
+			moves.pump(); // a move waiting for this host may go now (C43); the mover holds back before the first pass
 		}
 	});
 
@@ -257,7 +270,10 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 	// status turns "unknown" when the host's session closes; running again clears it (C34).
 	controller.hooks.instanceStatusChanged.attach(plugin.name, async (inst, prev) => {
 		const i = state.wasRunning.indexOf(inst.id);
-		if (inst.status === "unknown" && (prev === "running" || prev === "starting") && i === -1) {
+		if (inst.status === "deleted") { // C45
+			forget(state.wasRunning, [inst.id]);
+			await store.drop(inst.id);
+		} else if (inst.status === "unknown" && (prev === "running" || prev === "starting") && i === -1) {
 			state.wasRunning.push(inst.id);
 			await persist();
 		} else if ((inst.status === "running" || inst.status === "starting") && i !== -1) {
@@ -270,14 +286,15 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 	const failover = () => {
 		const now = Date.now();
 		const graceMs = config.get("balancer.failover_grace_minutes") * 60_000;
-		const ids = goneHosts(gone, now, graceMs, port.hostConnected);
+		const ids = goneHosts(gone, performance.now(), graceMs, port.hostConnected);
 		for (const id of ids.filter(h => !announced.has(h))) {
 			announced.add(id);
-			lifecycle(logger, "balancer.failover", "gone", { host: id, since: gone.get(id) }, "warn");
+			lifecycle(logger, "balancer.failover", "gone", { host: id, since: wallOf(gone.get(id)!) }, "warn");
 		}
 		const failedLately = (id: number) => state.moves.some(m => m.instanceId === id && m.reason === "failover"
 			&& m.step === "failed" && now - (m.endedAt ?? 0) < RETRY_FAILED_MS);
-		const { move, noCopy } = failovers(ids, tiles(), id => moves.moving(id) || failedLately(id), port.hasCopy);
+		const orphansHome = adoptOrphans(tiles(), state.moves);
+		const { move, noCopy } = failovers(ids, orphansHome, id => moves.moving(id) || failedLately(id), port.hasCopy);
 		for (const f of move) {
 			const wasRunning = wasRunningBefore(f.instanceId, state.wasRunning, state.moves);
 			moves.add({ instanceId: f.instanceId, from: f.from, reason: "failover", wasRunning });
@@ -288,13 +305,10 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 		}
 	};
 
-	// §4.3 unit 3, every 30 s. The first pass resumes the moves a restart interrupted, once the hosts have had time to
-	// reconnect (plan ruling 15).
+	// §4.3 unit 3, every 30 s. The first pass lets the mover start; it resumes the moves a restart interrupted as their
+	// hosts reconnect, or after the grace (plan ruling 15, C43).
 	const pass = () => {
-		if (!resumed) {
-			resumed = true;
-			moves.resume();
-		}
+		moves.resume();
 		if (config.get("balancer.enabled")) {
 			failover();
 		}

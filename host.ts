@@ -5,7 +5,7 @@ import * as lib from "@clusterio/lib";
 import type { HostPluginContext } from "@clusterio/host";
 import { lifecycle } from "universal_edges/runtime";
 import { HostLeavingEvent, PreflightRequest } from "./contracts.js";
-import { Fence, fenceEvent } from "./fence.js";
+import { Fence, fenceEvent, stopLive } from "./fence.js";
 import { local } from "./local.js";
 import { benchmark, factorioInstall, modsDir } from "./preflight.js";
 import { SAMPLE_MS } from "./telemetry.js";
@@ -19,15 +19,7 @@ export default async function loadHostPlugin(context: HostPluginContext) {
 		const live = [...host.instanceConnections.values()].map(c => c.instance)
 			.filter(i => i.status === "starting" || i.status === "running");
 		lifecycle(logger, "balancer.fence", "fired", { instances: live.map(i => i.id) }, "warn");
-		for (const i of live) {
-			i.stop().then(
-				() => lifecycle(logger, "balancer.fence", "stopped", { instance: i.id }, "warn"),
-				(err: Error) => {
-					const fields = { instance: i.id, error: err.message };
-					lifecycle(logger, "balancer.fence", "stop_failed", fields, "error");
-				},
-			);
-		}
+		stopLive(live, (phase, fields, level) => lifecycle(logger, "balancer.fence", phase, fields, level));
 	});
 	host.hooks.controllerConnectionEvent.attach(plugin.name, async event => {
 		fence.event(fenceEvent(event, host._shuttingDown));
@@ -35,6 +27,7 @@ export default async function loadHostPlugin(context: HostPluginContext) {
 
 	// §5.3: a clean shutdown stops the instances before it disconnects; say which were running first (C34).
 	host.hooks.shutdown.attach(plugin.name, async () => {
+		fence.event("connect"); // C52: an armed timer would hold the exit up
 		const running = [...host.instanceConnections.values()].map(c => c.instance)
 			.filter(i => i.status === "starting" || i.status === "running").map(i => i.id);
 		if (running.length > 0) {

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { Fence, fenceEvent } from "../../fence.js";
+import { Fence, fenceEvent, stopLive } from "../../fence.js";
 
 test("a drop arms the fence; it fires after the minutes unless a connect or resume comes first (§7)", t => {
 	t.mock.timers.enable({ apis: ["setTimeout"] });
@@ -63,4 +63,16 @@ test("a close arms the fence unless the host itself is shutting down; other even
 		assert.equal(fenceEvent(e, false), e);
 		assert.equal(fenceEvent(e, true), e);
 	}
+});
+
+test("a tile whose stop rejects is killed, and a failed kill is logged (C50)", async () => {
+	const lines: string[] = [];
+	const ok = { id: 1, stop: async () => undefined, kill: async () => assert.fail("killed a stopped tile") };
+	const bad = { id: 2, stop: async () => { throw new Error("hook"); }, kill: async () => undefined };
+	const worse = {
+		id: 3, stop: async () => { throw new Error("hook"); }, kill: async () => { throw new Error("gone"); },
+	};
+	stopLive([ok, bad, worse], (phase, fields) => lines.push(`${phase} ${fields.instance}`));
+	await new Promise(resolve => setImmediate(resolve));
+	assert.deepEqual(lines.sort(), ["kill_failed 3", "killed 2", "stop_failed 2", "stop_failed 3", "stopped 1"]);
 });

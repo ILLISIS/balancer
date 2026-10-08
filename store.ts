@@ -1,3 +1,4 @@
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type * as lib from "@clusterio/lib";
 import type { Copy, State } from "./state.js";
@@ -42,6 +43,12 @@ export class SaveStore {
 
 	/** controller.saves' "update", and the saves listed at start: queue each newer one, then pump. */
 	updated(saves: lib.SaveDetails[]): void {
+		for (const s of saves.filter(x => x.isDeleted)) {
+			// C48: Clusterio deletes an instance's saves on reassign; a queued one would be pulled from the new host.
+			if (this.waiting.get(s.instanceId)?.name === s.name) {
+				this.waiting.delete(s.instanceId);
+			}
+		}
 		for (const s of saves.filter(copyable)) {
 			const have = Math.max(
 				this.copy(s.instanceId)?.mtimeMs ?? 0,
@@ -53,6 +60,21 @@ export class SaveStore {
 			}
 		}
 		this.pump();
+	}
+
+	/** C49: the instance has a new host; hosts' clocks differ, so its next save there is pulled whatever its mtime. */
+	hostChanged(instanceId: number): void {
+		if (this.state.copies[instanceId]) {
+			this.state.copies[instanceId].mtimeMs = 0;
+		}
+	}
+
+	/** C45: the instance was deleted; its copy goes with it. ponytail: a pull in flight can still write the file. */
+	async drop(instanceId: number): Promise<void> {
+		delete this.state.copies[instanceId];
+		this.waiting.delete(instanceId);
+		await fs.rm(this.file(instanceId), { force: true });
+		await this.port.save();
 	}
 
 	/** Pull `name` now, after any pull of this instance in flight (the mover's step 3); rejects when it fails. */

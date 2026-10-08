@@ -27,7 +27,7 @@ function deferred() {
  * in `failing` throws, and a pre-flight in `failing` fails. `gates` holds a host's pre-flights until the test opens
  * them.
  */
-function fake(config: Partial<MoverConfig> = {}) {
+function fake(config: Partial<MoverConfig> = {}, resumed = true) {
 	const calls: string[] = [];
 	const trail: string[] = [];
 	const phases: string[] = [];
@@ -100,7 +100,12 @@ function fake(config: Partial<MoverConfig> = {}) {
 			finished.push(m.id);
 		},
 	};
-	const mover = new Mover(moves, bad, port, () => ({ maxConcurrent: 3, badPairHours: 24, ...config }));
+	const mover = new Mover(moves, bad, port, () => ({
+		maxConcurrent: 3, badPairHours: 24, graceMs: 15 * 60_000, ...config,
+	}));
+	if (resumed) {
+		mover.resume(); // nothing starts before the first resume (C47)
+	}
 	return {
 		port, keepRunning, mover, calls, trail, phases, finished, failing, gates, hosts, status, state, moves, bad,
 	};
@@ -355,4 +360,79 @@ test("a stop that throws while T still runs ends the move failed with no restart
 	await settle();
 	assert.deepEqual(f.calls.slice(-2), ["tick 7", "stop 7"]);
 	assert.deepEqual([m.step, f.status.get(7)], ["failed", "running"]);
+});
+
+const assignMove = (): Move => ({
+	id: "7-1", instanceId: 7, from: 1, to: 2, reason: "manual", pinned: false, step: "assign", wasRunning: true,
+	tried: [2], failures: 0, back: false, save: "world.zip", tick: 100, startedAt: 1, endedAt: null, error: null,
+});
+
+test("a resumed move waits for the host its step talks to, and runs once it connects (C43)", async () => {
+	const f = fake();
+	f.status.set(7, "stopped");
+	f.hosts.set(2, false);
+	f.moves.push(assignMove());
+	f.mover.resume();
+	await settle();
+	assert.deepEqual([f.calls, f.moves[0].step, f.mover.moving(7)], [[], "assign", true]);
+	f.hosts.set(2, true);
+	f.mover.pump();
+	f.mover.pump();
+	await settle();
+	assert.deepEqual(f.calls, ["assign 7 2", "push 7", "start 7 balancer.zip", "tick 7"]);
+	assert.equal(f.moves[0].step, "done");
+});
+
+test("a stop or pull step waits for the source host instead (C43)", async () => {
+	const f = fake();
+	f.hosts.set(1, false);
+	f.moves.push({ ...assignMove(), step: "pull" });
+	f.mover.resume();
+	await settle();
+	assert.deepEqual(f.calls, []);
+	f.hosts.set(1, true);
+	f.mover.pump();
+	await settle();
+	assert.equal(f.calls[0], "pull 7 world.zip");
+});
+
+test("after the grace a waiting move runs anyway, into its usual failure path (C43)", async () => {
+	const f = fake();
+	f.hosts.set(2, false);
+	f.status.set(7, "unknown");
+	f.port.assign = async () => {
+		throw new Error("Host is not connected");
+	};
+	f.moves.push(assignMove());
+	f.mover.resume();
+	await settle();
+	assert.equal(f.moves[0].step, "assign");
+	f.state.now += 15 * 60_000;
+	f.mover.pump();
+	await settle();
+	assert.deepEqual([f.moves[0].step, f.moves[0].error], ["failed", "Host is not connected"]);
+});
+
+test("nothing starts before the first resume (C47)", async () => {
+	const f = fake({}, false);
+	const m = f.mover.add({ instanceId: 7, ...manual });
+	await settle();
+	assert.deepEqual([f.calls, m.step], [[], "queued"]);
+	f.mover.resume();
+	await settle();
+	assert.equal(m.step, "done");
+});
+
+test("a pre-flight that throws leaves the pair usable; only a verdict marks it bad (C46)", async () => {
+	const f = fake();
+	f.port.preflight = async (id, h) => {
+		f.calls.push(`preflight ${id} ${h}`);
+		if (h === 2) {
+			throw new Error("stream timeout");
+		}
+		return { pass: false, msPerTick: 9, minUps: 40 };
+	};
+	f.mover.add({ instanceId: 7, ...manual });
+	await settle();
+	assert.deepEqual(Object.keys(f.bad), ["7:3"], "host 3 failed its pre-flight; host 2 only errored");
 });

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { failovers, forget, goneHosts, wasRunningBefore } from "../../failover.js";
+import { adoptOrphans, failovers, forget, goneHosts, wasRunningBefore } from "../../failover.js";
 import type { Move } from "../../contracts.js";
 
 test("a host is gone once it has been away for the grace and its session is closed (§5.3, spike 32)", () => {
@@ -44,4 +44,18 @@ test("forget drops the recorded instances of a host that came back (C34)", () =>
 	const recorded = [1, 2, 3];
 	forget(recorded, [2, 9]);
 	assert.deepEqual(recorded, [1, 3]);
+});
+
+test("an unassigned tile whose latest move is a failed failover counts as on that move's source (C44)", () => {
+	const mv = (instanceId: number, reason: string, step: string, from: number | null) => (
+		{ instanceId, reason, step, from } as unknown as Move
+	);
+	const tiles = [{ id: 10, host: null }, { id: 11, host: null }, { id: 12, host: null }, { id: 13, host: 3 }];
+	const moves = [
+		mv(10, "failover", "failed", 2), mv(11, "manual", "failed", 2), mv(12, "failover", "failed", 2),
+		mv(12, "failover", "done", 2),
+	];
+	const adopted = adoptOrphans(tiles, moves);
+	assert.deepEqual(adopted.map(t => t.host), [2, null, null, 3]);
+	assert.deepEqual(failovers([2], adopted, () => false, () => true).move, [{ instanceId: 10, from: 2 }]);
 });

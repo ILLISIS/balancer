@@ -140,3 +140,32 @@ test("a pump pull behind an earlier one keeps a newer queued save (C24b)", async
 	}
 	assert.equal(state.copies[7].name, "A2.zip");
 });
+
+test("a deleted save drops the queued entry of the same name (C48)", async () => {
+	const { store, pulls } = fakeStore(1);
+	store.updated([save(8, "a.zip", 100), save(7, "A.zip", 100)]);
+	await settle();
+	store.updated([save(7, "A.zip", 100, { isDeleted: true })]);
+	pulls[0].resolve();
+	await settle();
+	assert.deepEqual(pulls.map(p => p.name), ["a.zip"]);
+});
+
+test("a changed host zeroes the copy's mtime, so the next save there is pulled (C49)", async () => {
+	const { state, store, pulls } = fakeStore();
+	state.copies[7] = { name: "old.zip", mtimeMs: 9_000, size: 1, pulledAt: 1 };
+	store.updated([save(7, "new.zip", 500)]);
+	await settle();
+	assert.equal(pulls.length, 0, "older by the clocks");
+	store.hostChanged(7);
+	store.updated([save(7, "new.zip", 500)]);
+	await settle();
+	assert.deepEqual(pulls.map(p => p.name), ["new.zip"]);
+});
+
+test("drop removes the copy and its queued save (C45)", async () => {
+	const { state, store } = fakeStore(0);
+	state.copies[7] = { name: "old.zip", mtimeMs: 1, size: 1, pulledAt: 1 };
+	await store.drop(7);
+	assert.equal(store.copy(7), undefined);
+});

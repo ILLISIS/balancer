@@ -4,7 +4,20 @@ import type { Move } from "./contracts.js";
 export const RETRY_FAILED_MS = 600_000;
 
 /**
- * §5.3: the hosts away for the grace or longer. Only hosts whose session the controller has closed: reassigning an
+ * C44: Clusterio's assign leaves an instance unassigned when it throws, so a failover that failed there has no host.
+ * Such a tile counts as still on that failover's source, which keeps the retry seeing it.
+ */
+export function adoptOrphans<T extends { id: number; host: number | null }>(tiles: T[], moves: Move[]): T[] {
+	return tiles.map(t => {
+		const latest = t.host === null ? moves.filter(m => m.instanceId === t.id).at(-1) : undefined;
+		return latest?.reason === "failover" && latest.step === "failed" && latest.from !== null
+			? { ...t, host: latest.from } : t;
+	});
+}
+
+/**
+ * §5.3: the hosts away for the grace or longer (`gone` and `now` share one monotonic clock, C51). Only hosts whose
+ * session the controller has closed: reassigning an
  * instance while its old host's session is still open fails with "Session Closed" (spike 32).
  */
 export function goneHosts(
