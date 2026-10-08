@@ -81,12 +81,28 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 		await controller.sendTo({ instanceId: id }, new lib.InstanceSendRconRequest(command)),
 	);
 
+	/** Hosts running the join benchmark now (R11): not targets, not overload sources. */
+	const benchmarking = new Set<number>();
+	const speedOf = (hostId: number) => state.hosts[hostId]?.bench?.speed ?? null;
+	/** §5.6: learned slots override the benchmark's; null: no limit. */
+	const slotsOf = (hostId: number) => state.hosts[hostId]?.learned ?? state.hosts[hostId]?.bench?.slots ?? null;
+	/** A host's busy tiles (§5.8): running, at balancer.busy_tile_ms or more. */
+	const busyOn = (hostId: number) => tiles().filter(t => t.host === hostId && t.status === "running"
+		&& (telemetry.meanMs(t.id) ?? 0) >= config.get("balancer.busy_tile_ms")).length;
+	/** §5.8's view of the hosts. */
+	const hostFacts = () => [...controller.hosts.values()].map(h => ({
+		id: h.id,
+		open: h.connected && !state.draining.includes(h.id) && !benchmarking.has(h.id),
+		speed: speedOf(h.id),
+		slots: slotsOf(h.id),
+	}));
+
 	const port: MoverPort = {
 		now: Date.now,
 		wait: ms => sleep(ms),
 		candidates: (id, from) => candidates(
 			from,
-			[...controller.hosts.values()],
+			hostFacts(),
 			tiles(),
 			i => telemetry.last(i),
 			i => telemetry.meanMs(i),
@@ -126,7 +142,7 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 					r.msPerTick, minUps, config.get("balancer.preflight_max_ms"), config.get("balancer.ups_floor"),
 					running.length > 0,
 				);
-				return { pass, msPerTick: r.msPerTick, minUps };
+				return { pass, msPerTick: r.msPerTick, minUps, busy: busyOn(hostId) };
 			} finally {
 				stream.events.emit("close");
 			}

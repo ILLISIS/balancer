@@ -1,6 +1,7 @@
 import type { Move } from "./contracts.js";
 
-export type PreflightResult = { pass: boolean; msPerTick: number | null; minUps: number | null };
+/** A pre-flight's verdict; `busy` is the target's busy tiles then (§5.6's learned capacity). */
+export type PreflightResult = { pass: boolean; msPerTick: number | null; minUps: number | null; busy: number };
 export type MoverConfig = { maxConcurrent: number; badPairHours: number; graceMs: number };
 
 /** What the mover needs from Clusterio: controller.ts implements it (Task 6), the tests fake it. */
@@ -36,8 +37,8 @@ export type MoverPort = {
 /** §5.2: steps 4–6 are tried 3 times from the store before T goes back. */
 const ATTEMPTS = 3;
 const RETRY_MS = 10_000;
-/** Ended moves kept in balancer.json for the page and ctl. ponytail: phase 2's ledger keeps 500 with outcomes. */
-const KEEP_ENDED = 50;
+/** The ledger (§4.3 unit 4, R13): ended moves kept in balancer.json, each with its pre-flight and after-check. */
+const KEEP_ENDED = 500;
 
 const ended = (m: Move) => m.step === "done" || m.step === "failed";
 
@@ -196,7 +197,9 @@ export class Mover {
 	/** §5.2 step 1: the next target (or the named one), its pre-flight, and on a pass the next step. */
 	private async preflight(m: Move): Promise<void> {
 		const id = m.instanceId;
-		if (!this.port.hasCopy(id)) {
+		// §5.4, R12: a stopped tile leaves a draining host by steps 3–5: no pre-flight, and its pull makes the copy.
+		const reassign = m.reason === "drain" && !m.wasRunning;
+		if (!reassign && !this.port.hasCopy(id)) {
 			return this.end(m, "failed", "no stored copy to pre-flight and move (plan ruling 6)");
 		}
 		let to = m.to;
@@ -219,6 +222,9 @@ export class Mover {
 		if (!m.tried.includes(to)) {
 			m.tried.push(to);
 		}
+		if (reassign) {
+			return this.next(m, "stop");
+		}
 		await this.port.save();
 		this.port.log("preflight", m);
 		let r: PreflightResult | undefined;
@@ -228,6 +234,9 @@ export class Mover {
 			this.port.log("preflight_error", m, { error: err.message }, "warn");
 		}
 		const fields = { ms_per_tick: r?.msPerTick ?? null, min_ups: r?.minUps ?? null };
+		if (r) { // the ledger (§4.3 unit 4)
+			m.preflight = { msPerTick: r.msPerTick, minUps: r.minUps, busy: r.busy };
+		}
 		if (!r?.pass) {
 			if (r) { // C46: an error is no verdict; only a measured fail marks the pair bad
 				this.bad[`${id}:${to}`] = this.port.now() + this.config().badPairHours * 3_600_000;

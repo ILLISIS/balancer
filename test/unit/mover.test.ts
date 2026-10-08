@@ -60,7 +60,7 @@ function fake(config: Partial<MoverConfig> = {}, resumed = true) {
 			calls.push(`preflight ${id} ${h}`);
 			trail.push(`preflight ${id} ${h}`);
 			await gates.get(h);
-			return { pass: !failing.has(`preflight ${id} ${h}`), msPerTick: 3, minUps: 60 };
+			return { pass: !failing.has(`preflight ${id} ${h}`), msPerTick: 3, minUps: 60, busy: h };
 		},
 		tick: async id => {
 			call(`tick ${id}`);
@@ -448,9 +448,38 @@ test("a pre-flight that throws leaves the pair usable; only a verdict marks it b
 		if (h === 2) {
 			throw new Error("stream timeout");
 		}
-		return { pass: false, msPerTick: 9, minUps: 40 };
+		return { pass: false, msPerTick: 9, minUps: 40, busy: 0 };
 	};
 	f.mover.add({ instanceId: 7, ...manual });
 	await settle();
 	assert.deepEqual(Object.keys(f.bad), ["7:3"], "host 3 failed its pre-flight; host 2 only errored");
+});
+
+test("each pre-flight's verdict goes on the move, with the target's busy tiles (the ledger; §5.6)", async () => {
+	const f = fake();
+	f.failing.add("preflight 7 2");
+	const m = f.mover.add({ instanceId: 7, ...manual });
+	await settle();
+	assert.deepEqual(m.preflight, { msPerTick: 3, minUps: 60, busy: 3 }, "the last one: host 3's pass");
+});
+
+test("the ledger keeps every unfinished move and the last 500 ended ones (§4.3 unit 4, R13)", async () => {
+	const f = fake();
+	for (let i = 0; i < 500; i++) {
+		f.moves.push({ ...assignMove(), id: `old-${i}`, instanceId: 100 + i, step: "done", endedAt: i });
+	}
+	f.mover.add({ instanceId: 7, ...manual });
+	await settle();
+	assert.equal(f.moves.length, 500);
+	assert.deepEqual([f.moves[0].id, f.moves.at(-1)?.instanceId], ["old-1", 7], "the oldest went");
+});
+
+test("a draining host's stopped tile goes by steps 3–5: no pre-flight, no copy, not started (§5.4)", async () => {
+	const f = fake();
+	f.state.copy = false;
+	f.status.set(7, "stopped");
+	const m = f.mover.add({ instanceId: 7, from: 1, reason: "drain", wasRunning: false });
+	await settle();
+	assert.deepEqual(f.calls, ["pull 7 world.zip", "assign 7 2", "push 7"]);
+	assert.deepEqual([m.step, m.to, m.preflight], ["done", 2, null]);
 });
