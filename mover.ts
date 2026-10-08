@@ -40,7 +40,7 @@ const RETRY_MS = 10_000;
 /** The ledger (§4.3 unit 4, R13): ended moves kept in balancer.json, each with its pre-flight and after-check. */
 const KEEP_ENDED = 500;
 
-const ended = (m: Move) => m.step === "done" || m.step === "failed";
+export const ended = (m: Move) => m.step === "done" || m.step === "failed";
 
 /**
  * The mover (§4.3 unit 2, §5.2). Every step is written to balancer.json before it runs, and each one is safe to repeat,
