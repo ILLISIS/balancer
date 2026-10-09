@@ -48,6 +48,7 @@ test("it registers its 9 messages and 2 permissions, and §6's defaults", () => 
 		"balancer.enabled": true,
 		"balancer.failover_grace_minutes": 15,
 		"balancer.ups_floor": 58,
+		"balancer.failover_floor": 45,
 		"balancer.lag_minutes": 3,
 		"balancer.busy_tile_ms": 2,
 		"balancer.preflight_max_ms": 10,

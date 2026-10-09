@@ -2,6 +2,7 @@ import type { Check, Move } from "./contracts.js";
 import { RETRY_FAILED_MS } from "./failover.js";
 import { ended } from "./mover.js";
 import type { HostState, State } from "./state.js";
+import { predictedMs } from "./targets.js";
 import { KEEP_MS, type Telemetry } from "./telemetry.js";
 
 /** §5.5: at most one overload move per host in this long. */
@@ -21,6 +22,8 @@ export type View = {
 	draining: number[];
 	benchmarking: Set<number>;
 	telemetry: Telemetry;
+	/** A host's benchmark speed, null: none. */
+	speed: (hostId: number) => number | null;
 	floor: number;
 	busyMs: number;
 	lagMs: number;
@@ -87,7 +90,8 @@ export function drainMoves(v: View): Add[] {
 /**
  * §5.5, R16: per connected host that isn't benchmarking (R11) with a tile lagging (Telemetry.lagging), its heaviest
  * empty tile with a copy moves, at most once per host per 10 minutes. When the only lagging tile is the host's only
- * busy one, it is beyond that host: named in `beyond`, not moved.
+ * busy one, it moves only if it is empty and a benchmarked host predicts it under the 1000 / floor ms budget there
+ * (the source benchmarked too); else it is beyond that host: named in `beyond`, not moved.
  */
 export function overloadMoves(v: View): { add: Add[]; beyond: { host: number; instance: number }[] } {
 	const add: Add[] = [];
@@ -102,13 +106,23 @@ export function overloadMoves(v: View): { add: Add[]; beyond: { host: number; in
 		if (lagging.length === 0) {
 			continue;
 		}
+		const limited = v.moves.some(m => m.reason === "overload" && m.from === h
+			&& (!ended(m) || v.now - m.startedAt < OVERLOAD_EVERY_MS));
 		const busy = running.filter(t => ms(t.id) >= v.busyMs);
 		if (busy.length === 1 && lagging.length === 1 && lagging[0] === busy[0]) {
-			beyond.push({ host: h, instance: busy[0].id });
+			const t = busy[0];
+			const from = v.speed(h);
+			const faster = from !== null && v.connected.some(o => o !== h && !v.draining.includes(o)
+				&& !v.benchmarking.has(o) && v.speed(o) !== null
+				&& predictedMs(ms(t.id), from, v.speed(o)!) < 1000 / v.floor);
+			if (t.players === 0 && t.hasCopy && !moving(v, t.id) && !limited && faster) {
+				add.push({ instanceId: t.id, from: h, reason: "overload", wasRunning: true });
+			} else {
+				beyond.push({ host: h, instance: t.id });
+			}
 			continue;
 		}
-		if (v.moves.some(m => m.reason === "overload" && m.from === h
-			&& (!ended(m) || v.now - m.startedAt < OVERLOAD_EVERY_MS))) {
+		if (limited) {
 			continue;
 		}
 		const [heaviest] = running.filter(t => t.players === 0 && t.hasCopy && !moving(v, t.id))

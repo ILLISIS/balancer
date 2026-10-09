@@ -9,6 +9,7 @@ declare module "@clusterio/lib" {
 		"balancer.enabled": boolean;
 		"balancer.failover_grace_minutes": number;
 		"balancer.ups_floor": number;
+		"balancer.failover_floor": number;
 		"balancer.lag_minutes": number;
 		"balancer.busy_tile_ms": number;
 		"balancer.preflight_max_ms": number;
@@ -58,6 +59,12 @@ export const plugin: lib.PluginDeclaration = {
 		),
 		"balancer.ups_floor": number(
 			"UPS floor", "A target's tiles must stay at this UPS or above, in the pre-flight and to be eligible.", 58,
+		),
+		"balancer.failover_floor": number(
+			"Failover floor",
+			"When no host has a free slot, a gone host's tile may go to a full host whose tiles stay at this UPS " +
+			"or above (live and in its pre-flight). Below balancer.ups_floor.",
+			45,
 		),
 		"balancer.busy_tile_ms": number("Busy tile", "CPU ms per tick from which a tile counts as busy (§5.8).", 2),
 		"balancer.preflight_max_ms": number(

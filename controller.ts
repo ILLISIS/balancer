@@ -14,7 +14,7 @@ import { RETRY_FAILED_MS, adoptOrphans, failovers, forget, goneHosts, wasRunning
 import { Mover, type MoverPort } from "./mover.js";
 import { openState } from "./state.js";
 import { SaveStore, copyable } from "./store.js";
-import { candidates, verdict } from "./targets.js";
+import { candidates, failoverCandidates, predictedMs, verdict } from "./targets.js";
 import { SAMPLE_MS, Telemetry } from "./telemetry.js";
 import { proxyStream, pull, push } from "./transfer.js";
 
@@ -99,18 +99,35 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 		slots: slotsOf(h.id),
 	}));
 
+	/** Tier 1 of §5.8: the strict candidates for a tile on `from`. */
+	const strict = (from: number | null, fits?: (hostId: number) => boolean) => candidates(
+		from, hostFacts(), tiles(), i => telemetry.last(i), i => telemetry.meanMs(i),
+		config.get("balancer.ups_floor"), config.get("balancer.busy_tile_ms"), fits,
+	);
+
 	const port: MoverPort = {
 		now: Date.now,
 		wait: ms => sleep(ms),
-		candidates: (id, from) => candidates(
-			from,
-			hostFacts(),
-			tiles(),
-			i => telemetry.last(i),
-			i => telemetry.meanMs(i),
-			config.get("balancer.ups_floor"),
-			config.get("balancer.busy_tile_ms"),
-		),
+		candidates: (id, from, reason) => {
+			const floor = config.get("balancer.ups_floor");
+			if (reason === "failover") {
+				return failoverCandidates(
+					from, hostFacts(), tiles(), i => telemetry.last(i), i => telemetry.meanMs(i), floor,
+					config.get("balancer.failover_floor"), config.get("balancer.busy_tile_ms"),
+				);
+			}
+			let fits: ((hostId: number) => boolean) | undefined;
+			if (reason === "overload") {
+				const ms = telemetry.meanMs(id);
+				const fromSpeed = from === null ? null : speedOf(from);
+				fits = h => {
+					const toSpeed = speedOf(h);
+					return ms === undefined || fromSpeed === null || toSpeed === null
+						|| predictedMs(ms, fromSpeed, toSpeed) < 1000 / floor;
+				};
+			}
+			return strict(from, fits);
+		},
 		hostConnected: h => controller.hosts.get(h)?.connected ?? false,
 		status: id => instance(id)?.status ?? "unknown",
 		players,
@@ -121,13 +138,17 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 		hasCopy: id => store.copy(id) !== undefined,
 		// §5.2 step 1: the copy goes to the target through a proxy stream; its tiles' samples during the run, plus the
 		// one that covers its end, are the UPS check (plan ruling 4).
-		preflight: async (id, hostId) => {
+		preflight: async (id, hostId, reason) => {
 			const inst = instance(id);
 			const packId = inst?.config.get("factorio.mod_pack_id") ?? config.get("controller.default_mod_pack_id");
 			const pack = packId === null ? undefined : controller.modPacks.get(packId);
 			if (!inst || !pack) {
 				throw new Error(`instance ${id} has no mod pack`);
 			}
+			// A failover target outside tier 1 (a full host) is judged on the emergency floor. Decided before the run,
+			// whose own load can drop the host's tiles out of tier 1.
+			const emergency = reason === "failover"
+				&& !strict(inst.config.get("instance.assigned_host") ?? null).includes(hostId);
 			const file = store.file(id);
 			const stream = proxyStream(controller, { path: file, size: (await fs.stat(file)).size });
 			const from = Date.now();
@@ -141,8 +162,8 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 				const ups = running.flatMap(t => telemetry.minUps(t.id, from, Date.now()) ?? []);
 				const minUps = ups.length > 0 ? Math.min(...ups) : null;
 				const pass = verdict(
-					r.msPerTick, minUps, config.get("balancer.preflight_max_ms"), config.get("balancer.ups_floor"),
-					running.length > 0,
+					r.msPerTick, minUps, config.get("balancer.preflight_max_ms"),
+					config.get(emergency ? "balancer.failover_floor" : "balancer.ups_floor"), running.length > 0,
 				);
 				return { pass, msPerTick: r.msPerTick, minUps, busy: busyOn(hostId) };
 			} finally {
@@ -506,6 +527,7 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 		benchmarking,
 		telemetry,
 		floor: config.get("balancer.ups_floor"),
+		speed: speedOf,
 		busyMs: config.get("balancer.busy_tile_ms"),
 		lagMs: config.get("balancer.lag_minutes") * 60_000,
 		checkMs: config.get("balancer.after_check_minutes") * 60_000,

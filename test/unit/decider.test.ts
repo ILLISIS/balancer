@@ -14,7 +14,8 @@ const NOW = 100 * MIN;
 function view(over: Partial<View> = {}): View {
 	return {
 		now: NOW, connected: [1, 2, 3], tiles: [], moves: [], draining: [], benchmarking: new Set(),
-		telemetry: new Telemetry(() => NOW), floor: 58, busyMs: 2, lagMs: 3 * MIN, checkMs: 10 * MIN, ...over,
+		telemetry: new Telemetry(() => NOW), speed: () => null, floor: 58, busyMs: 2, lagMs: 3 * MIN,
+		checkMs: 10 * MIN, ...over,
 	};
 }
 const tile = (id: number, host: number, extra: Partial<Tile> = {}): Tile => (
@@ -115,6 +116,26 @@ test("a tile that lags as its host's only busy tile is beyond that host: named, 
 	samples(w, 10, 60, 12);
 	samples(w, 11, 50, 0.5); // a light tile lags next to the busy one: the busy one is the heaviest empty tile
 	assert.deepEqual(overloadMoves(w).add.map(a => a.instanceId), [10]);
+});
+
+test("a lone lagging tile moves to a faster benchmarked host that predicts it under budget (R16)", () => {
+	const speeds: Record<number, number> = { 1: 1, 2: 0.5 };
+	const speed = (h: number) => speeds[h] ?? null;
+	const lone = (players = 0) => {
+		const v = view({ tiles: [tile(10, 1, { players })], speed });
+		samples(v, 10, 50, 12); // 12 ms on speed 1 predicts 6 ms on speed 0.5, under 1000 / 58
+		return v;
+	};
+	assert.deepEqual(overloadMoves(lone()), {
+		add: [{ instanceId: 10, from: 1, reason: "overload", wasRunning: true }], beyond: [],
+	});
+	delete speeds[2];
+	assert.deepEqual(overloadMoves(lone()), { add: [], beyond: [{ host: 1, instance: 10 }] }, "no faster host");
+	speeds[2] = 0.5;
+	delete speeds[1];
+	assert.deepEqual(overloadMoves(lone()).beyond.length, 1, "unbenchmarked source");
+	speeds[1] = 1;
+	assert.deepEqual(overloadMoves(lone(1)), { add: [], beyond: [{ host: 1, instance: 10 }] }, "players on it");
 });
 
 test("the after-check (§5.6, R9): due at +after_check_minutes; T's mean UPS and its neighbours' lowest", () => {

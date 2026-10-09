@@ -10,7 +10,7 @@ export type MoverPort = {
 	/** The pause between retries of steps 4–6. */
 	wait(ms: number): Promise<void>;
 	/** Eligible targets, best first (§5.8 in phase 1); the mover drops the tried, bad and busy ones. */
-	candidates(instanceId: number, from: number | null): number[];
+	candidates(instanceId: number, from: number | null, reason: Move["reason"]): number[];
 	hostConnected(hostId: number): boolean;
 	status(instanceId: number): string;
 	players(instanceId: number): number;
@@ -18,7 +18,7 @@ export type MoverPort = {
 	loadedSave(instanceId: number): string | undefined;
 	hasCopy(instanceId: number): boolean;
 	/** §5.2 step 1 on the instance's stored copy; may throw: the next target is tried, no pair marked bad (C46). */
-	preflight(instanceId: number, hostId: number): Promise<PreflightResult>;
+	preflight(instanceId: number, hostId: number, reason: Move["reason"]): Promise<PreflightResult>;
 	tick(instanceId: number): Promise<number>;
 	stop(instanceId: number): Promise<void>;
 	/** Stop without saving: a stop would write the bad-tick game over the fresh copy (C27). */
@@ -205,7 +205,7 @@ export class Mover {
 		let to = m.to;
 		if (to === null) {
 			const now = this.port.now();
-			const left = this.port.candidates(id, m.from)
+			const left = this.port.candidates(id, m.from, m.reason)
 				.filter(h => !m.tried.includes(h) && (this.bad[`${id}:${h}`] ?? 0) <= now);
 			if (left.length === 0) {
 				const why = m.tried.length > 0 ? "every target failed its pre-flight" : "no eligible target";
@@ -229,7 +229,7 @@ export class Mover {
 		this.port.log("preflight", m);
 		let r: PreflightResult | undefined;
 		try {
-			r = await this.port.preflight(id, to);
+			r = await this.port.preflight(id, to, m.reason);
 		} catch (err: any) {
 			this.port.log("preflight_error", m, { error: err.message }, "warn");
 		}
