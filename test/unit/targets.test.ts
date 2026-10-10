@@ -151,6 +151,8 @@ test("memory §3.2: without a reading 60 s old or newer a host has no room and i
 	assert.equal(overLimit(f, 2), false, "so its memory timer clears");
 	assert.equal(room(f, 3, null), 0, "no reading at all");
 	assert.deepEqual([usedPct(f, 2), usedPct(f, 3), overLimit(f, 3)], [null, null, false]);
+	assert.equal(noRoom(f, null, 2), "host 2 has sent no memory reading in 60 s");
+	assert.equal(noRoom(f, null, 3), "host 3 has sent no memory reading in 60 s");
 });
 
 test("memory §3.5: over the limit is above it; exactly at it is not (MR9, Review Focus 4)", () => {
@@ -164,6 +166,7 @@ test("memory §3.5: over the limit is above it; exactly at it is not (MR9, Revie
 test("memory §3.3, M5: noRoom says why a tile doesn't fit, in MB", () => {
 	const f = facts({ figures: { 7: GIB } });
 	assert.equal(noRoom(f, 7, 1), undefined, "1.2 GiB need, 5 GiB room");
+	assert.equal(noRoom(facts({ figures: { 7: Math.floor(5 * GIB / 1.2) } }), 7, 1), undefined, "need = room fits");
 	f.limits.set(1, 50);
 	assert.equal(noRoom(f, 7, 1), "host 1 has room for 1024 MB, it needs 1229 MB");
 	f.limits.set(1, 10);

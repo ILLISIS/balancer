@@ -194,9 +194,12 @@ export function room(f: MemoryFacts, hostId: number, instanceId: number | null):
 
 /**
  * §3.3: undefined when T (null: a new tile) fits on H, need(T) ≤ room(H); else why not, as the operator reads it
- * (M5, MR2).
+ * (M5, MR2). A host without a reading 60 s old or newer is named as such, not as having no room.
  */
 export function noRoom(f: MemoryFacts, instanceId: number | null, hostId: number): string | undefined {
+	if (fresh(f, hostId) === undefined) {
+		return `host ${hostId} has sent no memory reading in 60 s`;
+	}
 	const n = need(f.figures, instanceId);
 	const r = room(f, hostId, instanceId);
 	return n <= r ? undefined : `host ${hostId} has room for ${mb(Math.max(0, r))} MB, it needs ${mb(n)} MB`;

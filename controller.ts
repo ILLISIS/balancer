@@ -630,7 +630,7 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 		const f = memoryFacts();
 		const v = view(f);
 		// Memory amendment §3.5: the timers move at the pass. ponytail: a dip between passes is missed; watch
-		// controller.systems' updates if 30 s ever matters.
+		// each HostMemoryEvent if 30 s ever matters.
 		v.memoryHigh = memoryTimers(overSince, v.connected.filter(h => overLimit(f, h)), v.now, v.lagMs);
 		for (const { move, check } of dueChecks(v)) {
 			judge(move, check);
