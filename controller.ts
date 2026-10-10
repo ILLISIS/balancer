@@ -9,13 +9,14 @@ import {
 	BenchmarkRequest, DrainRequest, FactorioVersionEvent, HostBenchmarkRequest, HostLeavingEvent, HostMemoryEvent,
 	MoveRequest, PreflightRequest, StatusRequest, TelemetryEvent, type Check, type Move, type Status,
 } from "./contracts.js";
-import { applyCheck, benchmarksDue, decide, dueChecks, type Add, type View } from "./decider.js";
+import { applyCheck, benchmarksDue, decide, dueChecks, memoryTimers, type Add, type View } from "./decider.js";
 import { RETRY_FAILED_MS, adoptOrphans, failovers, forget, goneHosts, wasRunningBefore } from "./failover.js";
 import { Mover, type MoverPort } from "./mover.js";
 import { openState } from "./state.js";
 import { SaveStore, copyable } from "./store.js";
 import {
-	accepts, candidates, failoverCandidates, mb, need, noRoom, predictedMs, room, verdict, type MemoryFacts,
+	accepts, candidates, failoverCandidates, limitPct, mb, need, noRoom, overLimit, predictedMs, room, usedPct, verdict,
+	type MemoryFacts,
 } from "./targets.js";
 import { SAMPLE_MS, Telemetry } from "./telemetry.js";
 import { proxyStream, pull, push } from "./transfer.js";
@@ -548,6 +549,8 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 		}
 	});
 	const warn = rateLimited(logger, 600_000);
+	/** Memory amendment §3.5: when a pass first saw each host over its memory limit. */
+	const overSince = new Map<number, number>();
 	/** §5.3: every gone host's instances move with their stored copies; candidates are pre-flighted one at a time. */
 	const failover = (): Add[] => {
 		const now = Date.now();
@@ -571,9 +574,9 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 		}));
 	};
 
-	/** What the decider reads (§4.3 unit 3): the cluster as it is now. */
-	const view = (): View => ({
-		now: Date.now(),
+	/** What the decider reads (§4.3 unit 3): the cluster as it is now, `f` its memory; the pass sets memoryHigh. */
+	const view = (f: MemoryFacts): View => ({
+		now: f.now,
 		connected: [...controller.hosts.values()].filter(h => h.connected).map(h => h.id),
 		tiles: tiles().map(t => ({ ...t, players: players(t.id), hasCopy: port.hasCopy(t.id) })),
 		moves: state.moves,
@@ -585,6 +588,9 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 		busyMs: config.get("balancer.busy_tile_ms"),
 		lagMs: config.get("balancer.lag_minutes") * 60_000,
 		checkMs: config.get("balancer.after_check_minutes") * 60_000,
+		fits: (id, h) => noRoom(f, id, h) === undefined,
+		memoryHigh: [],
+		figure: id => state.memory[id],
 	});
 	/** §5.6: record an after-check; a failed one marks its pair bad and lowers its host's slots. Logged either way. */
 	const judge = (m: Move, check: Check) => {
@@ -607,19 +613,33 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 	// first rule with work queues its moves (R1).
 	const pass = () => {
 		moves.resume();
-		const v = view();
+		const f = memoryFacts();
+		const v = view(f);
+		// Memory amendment §3.5: the timers move at the pass. ponytail: a dip between passes is missed; watch
+		// controller.systems' updates if 30 s ever matters.
+		v.memoryHigh = memoryTimers(overSince, v.connected.filter(h => overLimit(f, h)), v.now, v.lagMs);
 		for (const { move, check } of dueChecks(v)) {
 			judge(move, check);
 		}
-		// P4: balancer.enabled gates failover, overload and the after-check's re-move; drain runs either way.
+		// P4: balancer.enabled gates failover, overload (its memory trigger too) and the after-check's re-move; drain
+		// runs either way.
 		const enabled = config.get("balancer.enabled");
 		const d = decide(v, enabled ? failover() : [], enabled);
 		for (const a of d.add) {
 			moves.add(a);
 		}
 		for (const b of d.beyond) {
-			const fields = { op: "balancer.overload", phase: "beyond", host: b.host, instance: b.instance };
-			warn(`beyond:${b.instance}`, "balancer.overload beyond: it lags as its host's only busy tile", fields);
+			if (b.instance === null) {
+				const fields = {
+					op: "balancer.memory", phase: "no_move", host: b.host, used_pct: usedPct(f, b.host),
+					limit_pct: limitPct(f, b.host),
+				};
+				const text = "balancer.memory no_move: over its memory limit, and no empty tile fits elsewhere";
+				warn(`no_move:${b.host}`, text, fields);
+			} else {
+				const fields = { op: "balancer.overload", phase: "beyond", host: b.host, instance: b.instance };
+				warn(`beyond:${b.instance}`, "balancer.overload beyond: it lags as its host's only busy tile", fields);
+			}
 		}
 		benchmarks(v); // P4: the join benchmark runs whatever balancer.enabled says
 		moves.pump();

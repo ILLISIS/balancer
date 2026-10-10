@@ -127,7 +127,7 @@ export type MemoryFacts = {
 	figures: Record<string, number>;
 	/** A host's reading; undefined: none. */
 	memory: (hostId: number) => HostMemory | undefined;
-	/** The limits the hosts reported (MemoryLimitEvent). */
+	/** The limits the hosts reported (HostMemoryEvent). */
 	limits: Map<number, number>;
 	tiles: TileFact[];
 	moves: Move[];

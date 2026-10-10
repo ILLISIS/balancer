@@ -26,7 +26,7 @@ export const MoveSchema = Type.Object({
 	to: nullable(Type.Integer()),
 	reason: Type.Union([
 		Type.Literal("manual"), Type.Literal("failover"), Type.Literal("drain"), Type.Literal("overload"),
-		Type.Literal("after_check"),
+		Type.Literal("after_check"), Type.Literal("memory"),
 	]),
 	/** The operator named the target: no other host is tried (plan ruling 11). */
 	pinned: Type.Boolean(),

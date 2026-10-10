@@ -5,7 +5,7 @@ import type { HostState, State } from "./state.js";
 import { predictedMs } from "./targets.js";
 import { KEEP_MS, type Telemetry } from "./telemetry.js";
 
-/** §5.5: at most one overload move per host in this long. */
+/** §5.5: at most one overload move per host in this long; memory moves share it (memory amendment §3.5). */
 const OVERLOAD_EVERY_MS = 600_000;
 /** S4: a draining host with no eligible target is left alone this long. */
 const NO_TARGET_MS = 600_000;
@@ -13,6 +13,11 @@ const NO_TARGET_MS = 600_000;
 /** A move the decider asks for: Mover.add's argument. */
 export type Add = { instanceId: number; from: number; reason: Move["reason"]; wasRunning: boolean };
 export type Tile = { id: number; host: number | null; status: string; players: number; hasCopy: boolean };
+/**
+ * Named, not moved: a tile that lags as its host's only busy tile (§5.5), or, with `instance` null, a host over its
+ * memory limit with no empty tile that fits elsewhere (memory amendment §3.5, MR7).
+ */
+export type Beyond = { host: number; instance: number | null };
 /** What the decider reads (§4.3 unit 3); the controller builds it each pass, the tests and the bench by hand. */
 export type View = {
 	now: number;
@@ -28,8 +33,14 @@ export type View = {
 	busyMs: number;
 	lagMs: number;
 	checkMs: number;
+	/** Memory amendment §3.3: instance T fits on host H in memory. */
+	fits: (instanceId: number, hostId: number) => boolean;
+	/** §3.5: the hosts over their memory limit for lagMs or longer (memoryTimers); the controller's pass sets it. */
+	memoryHigh: number[];
+	/** §3.1: a tile's memory figure, bytes; undefined: none yet. */
+	figure: (instanceId: number) => number | undefined;
 };
-export type Decision = { rule: Move["reason"] | null; add: Add[]; beyond: { host: number; instance: number }[] };
+export type Decision = { rule: Move["reason"] | null; add: Add[]; beyond: Beyond[] };
 
 const moving = (v: View, id: number) => v.moves.some(m => m.instanceId === id && !ended(m));
 const failedLately = (v: View, id: number, reason: Move["reason"]) => v.moves.some(m => m.instanceId === id
@@ -37,8 +48,9 @@ const failedLately = (v: View, id: number, reason: Move["reason"]) => v.moves.so
 
 /**
  * §4.3 unit 3, R1: the first rule with work takes the pass: failover (its moves found by the controller), drain,
- * overload, then the after-check's re-moves. A rule has work when it asks for moves now or one of its moves is
- * unfinished. P4: disabled, only drain runs, and `failover` comes empty.
+ * overload (its memory trigger first: memory amendment §3.5, MR8), then the after-check's re-moves.
+ * A rule has work when it asks for moves now or one of its moves is unfinished. P4: disabled, only drain runs,
+ * and `failover` comes empty.
  */
 export function decide(v: View, failover: Add[], enabled: boolean): Decision {
 	const holds = (rule: Move["reason"], add: Add[]) => add.length > 0
@@ -54,7 +66,8 @@ export function decide(v: View, failover: Add[], enabled: boolean): Decision {
 		return { rule: null, add: [], beyond: [] };
 	}
 	const overload = overloadMoves(v);
-	if (holds("overload", overload.add)) {
+	// Memory amendment §3.5: memory moves are §5.5's second trigger, in its slot (MR8).
+	if (holds("overload", overload.add) || holds("memory", [])) {
 		return { rule: "overload", ...overload };
 	}
 	const recheck = recheckMoves(v);
@@ -90,31 +103,50 @@ export function drainMoves(v: View): Add[] {
 /**
  * §5.5, R16: per connected host that isn't benchmarking (R11) with a tile lagging (Telemetry.lagging), its heaviest
  * empty tile with a copy moves, at most once per host per 10 minutes. When the only lagging tile is the host's only
- * busy one, it moves only if it is empty and a benchmarked host predicts it under the 1000 / floor ms budget there
- * (the source benchmarked too); else it is beyond that host: named in `beyond`, not moved.
+ * busy one, it moves only if it is empty and a benchmarked host it fits on (M6) predicts it under the 1000 / floor ms
+ * budget there (the source benchmarked too); else it is beyond that host: named in `beyond`, not moved.
+ * Memory amendment §3.5 (M8) comes first: a host over its memory limit for lagMs moves its empty tile with a copy that
+ * has the largest figure (none counts as 0) and fits on another open host, with reason memory, under the same
+ * 10-minute limit; with none, the host is named in `beyond` with instance null. Either way it gets no lag move that
+ * pass (MR10).
  */
-export function overloadMoves(v: View): { add: Add[]; beyond: { host: number; instance: number }[] } {
+export function overloadMoves(v: View): { add: Add[]; beyond: Beyond[] } {
 	const add: Add[] = [];
-	const beyond: { host: number; instance: number }[] = [];
+	const beyond: Beyond[] = [];
 	const ms = (id: number) => v.telemetry.meanMs(id) ?? -1;
+	/** The hosts a tile from h could go to: connected, not h, not draining, not benchmarking. */
+	const others = (h: number) => v.connected.filter(o => o !== h && !v.draining.includes(o)
+		&& !v.benchmarking.has(o));
 	for (const h of v.connected) {
 		if (v.benchmarking.has(h)) {
 			continue;
 		}
 		const running = v.tiles.filter(t => t.host === h && t.status === "running");
+		const limited = v.moves.some(m => (m.reason === "overload" || m.reason === "memory") && m.from === h
+			&& (!ended(m) || v.now - m.startedAt < OVERLOAD_EVERY_MS));
+		if (v.memoryHigh.includes(h)) {
+			if (!limited) {
+				const [largest] = running.filter(t => t.players === 0 && t.hasCopy && !moving(v, t.id)
+					&& others(h).some(o => v.fits(t.id, o)))
+					.sort((a, b) => (v.figure(b.id) ?? 0) - (v.figure(a.id) ?? 0));
+				if (largest) {
+					add.push({ instanceId: largest.id, from: h, reason: "memory", wasRunning: true });
+				} else {
+					beyond.push({ host: h, instance: null });
+				}
+			}
+			continue;
+		}
 		const lagging = running.filter(t => v.telemetry.lagging(t.id, v.floor, v.lagMs));
 		if (lagging.length === 0) {
 			continue;
 		}
-		const limited = v.moves.some(m => m.reason === "overload" && m.from === h
-			&& (!ended(m) || v.now - m.startedAt < OVERLOAD_EVERY_MS));
 		const busy = running.filter(t => ms(t.id) >= v.busyMs);
 		if (busy.length === 1 && lagging.length === 1 && lagging[0] === busy[0]) {
 			const t = busy[0];
 			const from = v.speed(h);
-			const faster = from !== null && v.connected.some(o => o !== h && !v.draining.includes(o)
-				&& !v.benchmarking.has(o) && v.speed(o) !== null
-				&& predictedMs(ms(t.id), from, v.speed(o)!) < 1000 / v.floor);
+			const faster = from !== null && others(h).some(o => v.speed(o) !== null
+				&& predictedMs(ms(t.id), from, v.speed(o)!) < 1000 / v.floor && v.fits(t.id, o));
 			if (t.players === 0 && t.hasCopy && !moving(v, t.id) && !limited && faster) {
 				add.push({ instanceId: t.id, from: h, reason: "overload", wasRunning: true });
 			} else {
@@ -226,4 +258,23 @@ export function benchmarksDue(
 			&& !v.moves.some(m => !ended(m) && (m.from === h || m.to === h))
 			&& (bench === undefined || bench.version !== version || bench.ref !== ref);
 	});
+}
+
+/**
+ * Memory amendment §3.5: keep `since` (host → when a pass first saw it over its memory limit) current: each host in
+ * `over` keeps its time or starts one now, and every other host's is cleared (at or under its limit, or a stale or
+ * missing reading). Returns the hosts over their limit for `lagMs` or longer.
+ */
+export function memoryTimers(since: Map<number, number>, over: number[], now: number, lagMs: number): number[] {
+	for (const h of since.keys()) {
+		if (!over.includes(h)) {
+			since.delete(h);
+		}
+	}
+	for (const h of over) {
+		if (!since.has(h)) {
+			since.set(h, now);
+		}
+	}
+	return over.filter(h => now - since.get(h)! >= lagMs);
 }

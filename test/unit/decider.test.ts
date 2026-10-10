@@ -2,7 +2,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { Move } from "../../contracts.js";
 import {
-	applyCheck, benchmarksDue, decide, drainMoves, dueChecks, overloadMoves, recheckMoves, type Tile, type View,
+	applyCheck, benchmarksDue, decide, drainMoves, dueChecks, memoryTimers, overloadMoves, recheckMoves, type Tile,
+	type View,
 } from "../../decider.js";
 import { emptyState } from "../../state.js";
 import { Telemetry } from "../../telemetry.js";
@@ -15,7 +16,7 @@ function view(over: Partial<View> = {}): View {
 	return {
 		now: NOW, connected: [1, 2, 3], tiles: [], moves: [], draining: [], benchmarking: new Set(),
 		telemetry: new Telemetry(() => NOW), speed: () => null, floor: 58, busyMs: 2, lagMs: 3 * MIN,
-		checkMs: 10 * MIN, ...over,
+		checkMs: 10 * MIN, fits: () => true, memoryHigh: [], figure: () => undefined, ...over,
 	};
 }
 const tile = (id: number, host: number, extra: Partial<Tile> = {}): Tile => (
@@ -237,4 +238,75 @@ test("the join benchmark runs automatically only on a quiet host with no current
 	assert.deepEqual(benchmarksDue(v, versions, hosts, "tile:7", () => false), [4, 5], "1 hasn't reported a version");
 	v.draining = [5];
 	assert.deepEqual(benchmarksDue(v, versions, hosts, "tile:7", () => false), [4], "M5: a draining host waits");
+});
+
+const GIB = 2 ** 30;
+
+test("memory §3.5 (M8): over its limit, a host moves its largest empty tile that fits elsewhere, reason memory", () => {
+	const figures: Record<number, number> = { 10: 4 * GIB, 11: 3 * GIB, 12: 2 * GIB, 13: GIB };
+	const v = view({
+		tiles: [tile(10, 1), tile(11, 1, { players: 1 }), tile(12, 1), tile(13, 1), tile(20, 2)],
+		memoryHigh: [1],
+		figure: id => figures[id],
+		fits: id => id !== 10, // the largest fits on no other host
+	});
+	assert.deepEqual(overloadMoves(v), {
+		add: [{ instanceId: 12, from: 1, reason: "memory", wasRunning: true }], beyond: [],
+	}, "10 fits nowhere and 11 is occupied: 12 is the largest that can go");
+	v.fits = () => false;
+	assert.deepEqual(overloadMoves(v), { add: [], beyond: [{ host: 1, instance: null }] }, "none can go: no_move");
+	v.fits = (_id, h) => h === 1;
+	assert.deepEqual(overloadMoves(v).beyond, [{ host: 1, instance: null }], "fitting on its own host doesn't count");
+	v.fits = () => true;
+	v.draining = [2, 3];
+	assert.deepEqual(overloadMoves(v).beyond, [{ host: 1, instance: null }], "draining hosts aren't open");
+	v.draining = [];
+	v.memoryHigh = [];
+	assert.deepEqual(overloadMoves(v), { add: [], beyond: [] }, "not over its limit for lag_minutes: nothing");
+});
+
+test("memory §3.5: a tile with no figure yet goes after every measured one (Review Focus 3)", () => {
+	const v = view({ tiles: [tile(10, 1), tile(11, 1)], memoryHigh: [1], figure: id => (id === 11 ? GIB : undefined) });
+	assert.deepEqual(overloadMoves(v).add.map(a => a.instanceId), [11]);
+});
+
+test("memory §3.5: memory comes first and shares the 10-minute limit; its moves hold the overload slot (MR8)", () => {
+	const v = view({
+		tiles: [tile(10, 1), tile(11, 1)], memoryHigh: [1], figure: id => (id === 10 ? 2 * GIB : GIB),
+	});
+	samples(v, 10, 50, 3); // lagging
+	samples(v, 11, 60, 4); // the heaviest by CPU: the lag trigger alone would move 11
+	assert.deepEqual(overloadMoves(v).add, [{ instanceId: 10, from: 1, reason: "memory", wasRunning: true }],
+		"one move, the memory one: the largest figure");
+	v.moves.push(move({ instanceId: 10, reason: "memory", startedAt: NOW - 9 * MIN }));
+	assert.deepEqual(overloadMoves(v).add, [], "a memory move 9 minutes ago");
+	v.memoryHigh = [];
+	assert.deepEqual(overloadMoves(v).add, [], "holds the lag trigger too");
+	v.moves[0].reason = "overload";
+	v.memoryHigh = [1];
+	assert.deepEqual(overloadMoves(v).add, [], "and an overload move holds the memory trigger");
+	v.moves[0].startedAt = NOW - 10 * MIN;
+	assert.deepEqual(overloadMoves(v).add.map(a => a.reason), ["memory"], "10 minutes on");
+	v.moves[0] = move({ instanceId: 10, reason: "memory", step: "pull", endedAt: null });
+	assert.deepEqual(decide(v, [], true), { rule: "overload", add: [], beyond: [] },
+		"an unfinished memory move holds the overload rule's slot");
+	assert.equal(decide(v, [], false).rule, null, "P4: disabled, no memory moves");
+});
+
+test("memory §3.5: the timer: over the limit for lag_minutes; a pass at or under it (or stale) clears it", () => {
+	const since = new Map<number, number>();
+	assert.deepEqual(memoryTimers(since, [1, 2], NOW, 3 * MIN), [], "first seen over");
+	assert.deepEqual(memoryTimers(since, [1, 2], NOW + 3 * MIN - 1, 3 * MIN), [], "under 3 minutes");
+	assert.deepEqual(memoryTimers(since, [1], NOW + 3 * MIN, 3 * MIN), [1], "3 minutes; 2 read at or under its limit");
+	assert.deepEqual([...since.keys()], [1], "2's timer is cleared");
+	assert.deepEqual(memoryTimers(since, [1, 2], NOW + 4 * MIN, 3 * MIN), [1], "2 starts again from 0");
+});
+
+test("M6: a lone lagging tile moves only to a faster host it fits on; else it is beyond", () => {
+	const speeds: Record<number, number> = { 1: 1, 2: 0.5 };
+	const v = view({ tiles: [tile(10, 1)], speed: h => speeds[h] ?? null });
+	samples(v, 10, 50, 12);
+	assert.deepEqual(overloadMoves(v).add.map(a => a.instanceId), [10]);
+	v.fits = (_id, h) => h !== 2;
+	assert.deepEqual(overloadMoves(v), { add: [], beyond: [{ host: 1, instance: 10 }] }, "the faster host has no room");
 });
