@@ -225,6 +225,27 @@ export class FactorioVersionEvent {
 }
 
 /**
+ * Host → controller every 10 s, at each connect and when balancer.memory_limit_pct changes (memory amendment §3.2,
+ * MR-C1): this host's limit, and the machine's memory in bytes as Clusterio's SystemInfo reads it (os.totalmem(),
+ * os.freemem()). The controller keeps both in memory only, the reading stamped with its own clock.
+ */
+export class HostMemoryEvent {
+	declare ["constructor"]: typeof HostMemoryEvent;
+	static type = "event" as const;
+	static src = "host" as const;
+	static dst = "controller" as const;
+	static plugin = "balancer" as const;
+
+	constructor(public limitPct: number, public capacity: number, public available: number) { }
+
+	static jsonSchema = Type.Object({ limitPct: Type.Number(), capacity: Type.Number(), available: Type.Number() });
+
+	static fromJSON(json: Static<typeof HostMemoryEvent.jsonSchema>) {
+		return new this(json.limitPct, json.capacity, json.available);
+	}
+}
+
+/**
  * Controller → host (§5.7): download the stream's reference save and run the join benchmark on it with `modPack` (null:
  * no mods, P5) on Factorio `factorioVersion`. Answers the speed, the slots, the cores and each count's ms per tick.
  */

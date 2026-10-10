@@ -4,7 +4,9 @@ import * as path from "node:path";
 import * as lib from "@clusterio/lib";
 import type { HostPluginContext } from "@clusterio/host";
 import { lifecycle } from "universal_edges/runtime";
-import { FactorioVersionEvent, HostBenchmarkRequest, HostLeavingEvent, PreflightRequest } from "./contracts.js";
+import {
+	FactorioVersionEvent, HostBenchmarkRequest, HostLeavingEvent, HostMemoryEvent, PreflightRequest,
+} from "./contracts.js";
 import { Fence, fenceEvent, stopLive } from "./fence.js";
 import { local } from "./local.js";
 import { benchmark, factorioInstall, joinBenchmark, modsDir } from "./preflight.js";
@@ -22,6 +24,22 @@ export default async function loadHostPlugin(context: HostPluginContext) {
 		stopLive(live, (phase, fields, level) => lifecycle(logger, "balancer.fence", phase, fields, level));
 	});
 	const factorioDir = () => path.resolve(host.config.get("host.factorio_directory"));
+	/**
+	 * Memory amendment §3.2, MR-C1: this host's limit and the machine's memory, for the controller, which keeps them in
+	 * memory only: at each connect, when the limit changes, and every SAMPLE_MS (a reading older than 60 s gives the
+	 * host no room). Not while cut off: a resumed session would replay old readings, which the controller stamps new.
+	 */
+	const reportMemory = () => {
+		if (!host.connected) {
+			return;
+		}
+		try {
+			host.send(new HostMemoryEvent(host.config.get("balancer.memory_limit_pct"), os.totalmem(), os.freemem()));
+		} catch (err: any) {
+			logger.verbose(`balancer: HostMemoryEvent not sent: ${err.message}`);
+		}
+	};
+	setInterval(reportMemory, SAMPLE_MS).unref();
 	host.hooks.controllerConnectionEvent.attach(plugin.name, async event => {
 		fence.event(fenceEvent(event, host._shuttingDown));
 		if (event === "connect") {
@@ -29,6 +47,12 @@ export default async function loadHostPlugin(context: HostPluginContext) {
 			factorioInstall(factorioDir(), "latest").then(f => host.send(new FactorioVersionEvent(f.version))).catch(
 				(err: Error) => logger.warn(`balancer: the Factorio version was not reported: ${err.message}`),
 			);
+			reportMemory();
+		}
+	});
+	host.hooks.hostConfigFieldChanged.attach(plugin.name, async field => {
+		if (field === "balancer.memory_limit_pct") {
+			reportMemory();
 		}
 	});
 

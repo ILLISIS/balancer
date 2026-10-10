@@ -6,8 +6,8 @@ import type { ControllerPluginContext } from "@clusterio/controller";
 import { lifecycle, rateLimited } from "universal_edges/runtime";
 import { setBalancerApi } from "./api.js";
 import {
-	BenchmarkRequest, DrainRequest, FactorioVersionEvent, HostBenchmarkRequest, HostLeavingEvent, MoveRequest,
-	PreflightRequest, StatusRequest, TelemetryEvent, type Check, type Move, type Status,
+	BenchmarkRequest, DrainRequest, FactorioVersionEvent, HostBenchmarkRequest, HostLeavingEvent, HostMemoryEvent,
+	MoveRequest, PreflightRequest, StatusRequest, TelemetryEvent, type Check, type Move, type Status,
 } from "./contracts.js";
 import { applyCheck, benchmarksDue, decide, dueChecks, type Add, type View } from "./decider.js";
 import { RETRY_FAILED_MS, adoptOrphans, failovers, forget, goneHosts, wasRunningBefore } from "./failover.js";
@@ -57,6 +57,10 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 	const telemetry = new Telemetry();
 	/** Memory amendment §3.1: a tile's figure rose since the last pass, which then writes balancer.json (MR5). */
 	let figuresRose = false;
+	/** Memory amendment §3.2: each host's balancer.memory_limit_pct, as its HostMemoryEvent said (90 until then). */
+	const limits = new Map<number, number>();
+	/** MR-C1: each host's machine memory from its last HostMemoryEvent, bytes, `at` the controller's clock then. */
+	const readings = new Map<number, { capacity: number; available: number; at: number }>();
 	const store = new SaveStore(state, path.join(dir, "balancer", "saves"), {
 		pull: (id, name, file) => pull(controller, id, name, file),
 		host: id => controller.instances.get(id)?.config.get("instance.assigned_host") ?? null,
@@ -408,6 +412,14 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 	controller.handle(FactorioVersionEvent, async (event: FactorioVersionEvent, src: lib.Address) => {
 		versions.set(src.id, event.version);
 		benchFailed.delete(src.id); // a new session: a failed benchmark may run again
+	});
+
+	controller.handle(HostMemoryEvent, async (event: HostMemoryEvent, src: lib.Address) => {
+		readings.set(src.id, { capacity: event.capacity, available: event.available, at: Date.now() });
+		if (limits.get(src.id) !== event.limitPct) {
+			limits.set(src.id, event.limitPct);
+			lifecycle(logger, "balancer.memory", "limit", { host: src.id, limit_pct: event.limitPct }); // MR18, K3
+		}
 	});
 
 	// §5.7's "benchmark now": it runs whatever the host carries (the operator chose), and answers once it has started.

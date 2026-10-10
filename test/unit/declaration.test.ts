@@ -6,8 +6,8 @@ import { pathToFileURL } from "node:url";
 import * as lib from "@clusterio/lib";
 import { balancerApi, setBalancerApi } from "../../api.js";
 import {
-	BenchmarkRequest, DrainRequest, FactorioVersionEvent, HostBenchmarkRequest, HostLeavingEvent, MoveRequest,
-	PreflightRequest, TelemetryEvent,
+	BenchmarkRequest, DrainRequest, FactorioVersionEvent, HostBenchmarkRequest, HostLeavingEvent, HostMemoryEvent,
+	MoveRequest, PreflightRequest, TelemetryEvent,
 } from "../../contracts.js";
 import { plugin } from "../../index.js";
 
@@ -27,10 +27,10 @@ test("the declaration names the plugin; each compiled entrypoint exists and expo
 	}
 });
 
-test("it registers its 9 messages and 2 permissions, and §6's defaults", () => {
+test("it registers its 10 messages and 2 permissions, and §6's defaults", () => {
 	lib.registerPluginMessages([plugin] as unknown as lib.PluginNodeEnvInfo[]);
 	lib.registerPluginPermissions([plugin] as unknown as lib.PluginNodeEnvInfo[]);
-	for (const name of ["TelemetryEvent", "HostLeavingEvent", "FactorioVersionEvent"]) {
+	for (const name of ["TelemetryEvent", "HostLeavingEvent", "FactorioVersionEvent", "HostMemoryEvent"]) {
 		assert.ok(lib.Link._eventsByName.has(`balancer:${name}`), name);
 	}
 	const requests = [
@@ -39,7 +39,7 @@ test("it registers its 9 messages and 2 permissions, and §6's defaults", () => 
 	for (const name of requests) {
 		assert.ok(lib.Link._requestsByName.has(`balancer:${name}`), name);
 	}
-	assert.equal(plugin.messages?.length, 9);
+	assert.equal(plugin.messages?.length, 10);
 	assert.ok(lib.permissions.has("balancer.view") && lib.permissions.has("balancer.move"));
 	const defaults = Object.fromEntries(
 		Object.entries(plugin.controllerConfigFields ?? {}).map(([field, def]) => [field, def.initialValue]),
@@ -58,6 +58,7 @@ test("it registers its 9 messages and 2 permissions, and §6's defaults", () => 
 		"balancer.reference_save": undefined,
 	});
 	assert.equal(plugin.hostConfigFields?.["balancer.fence_minutes"]?.initialValue, 12);
+	assert.equal(plugin.hostConfigFields?.["balancer.memory_limit_pct"]?.initialValue, 90, "memory amendment §3.8");
 });
 
 test("every message survives the JSON its link carries", () => {
@@ -73,6 +74,8 @@ test("every message survives the JSON its link carries", () => {
 	assert.deepEqual(roundTrip(MoveRequest, new MoveRequest(7, 2)), new MoveRequest(7, 2));
 	const version = new FactorioVersionEvent("2.1.21");
 	assert.deepEqual(roundTrip(FactorioVersionEvent, version), version);
+	const memory = new HostMemoryEvent(95, 32 * 2 ** 30, 12 * 2 ** 30);
+	assert.deepEqual(roundTrip(HostMemoryEvent, memory), memory);
 	assert.deepEqual(roundTrip(DrainRequest, new DrainRequest(2, true)), new DrainRequest(2, true));
 	assert.deepEqual(roundTrip(BenchmarkRequest, new BenchmarkRequest(2)), new BenchmarkRequest(2));
 	const pack = new lib.ModPack();

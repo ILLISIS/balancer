@@ -1,7 +1,7 @@
 import type * as lib from "@clusterio/lib";
 import {
-	BenchmarkRequest, DrainRequest, FactorioVersionEvent, HostBenchmarkRequest, HostLeavingEvent, MoveRequest,
-	PreflightRequest, StatusRequest, TelemetryEvent,
+	BenchmarkRequest, DrainRequest, FactorioVersionEvent, HostBenchmarkRequest, HostLeavingEvent, HostMemoryEvent,
+	MoveRequest, PreflightRequest, StatusRequest, TelemetryEvent,
 } from "./contracts.js";
 
 declare module "@clusterio/lib" {
@@ -20,6 +20,7 @@ declare module "@clusterio/lib" {
 	}
 	export interface HostConfigFields {
 		"balancer.fence_minutes": number;
+		"balancer.memory_limit_pct": number;
 	}
 	export interface Permissions {
 		"balancer.view": never;
@@ -100,10 +101,18 @@ export const plugin: lib.PluginDeclaration = {
 			"Keep it below the controller's balancer.failover_grace_minutes.",
 			12,
 		),
+		"balancer.memory_limit_pct": number(
+			"Memory limit",
+			"Percent of this machine's memory the balancer fills: a tile goes to this host only while its peak " +
+			"memory (× 1.2) keeps the machine at or under it, and above it for balancer.lag_minutes an empty tile " +
+			"moves away. Raise it on a machine with plenty of memory.",
+			90,
+		),
 	},
 	messages: [
 		HostLeavingEvent, TelemetryEvent, PreflightRequest, MoveRequest, StatusRequest, FactorioVersionEvent,
 		HostBenchmarkRequest, DrainRequest, BenchmarkRequest,
+		HostMemoryEvent,
 	],
 	permissions: [
 		{
