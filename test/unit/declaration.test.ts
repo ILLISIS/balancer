@@ -66,7 +66,7 @@ test("every message survives the JSON its link carries", () => {
 		assert.equal(lib.compile(Class.jsonSchema as any)(json), true, message.constructor.name);
 		return Class.fromJSON(json);
 	};
-	const samples = [{ at: 1000, ups: 59.5, ms: 2.25 }, { at: 11000, ups: 60, ms: null }];
+	const samples = [{ at: 1000, ups: 59.5, ms: 2.25 }, { at: 11000, ups: 60, ms: null, mem: 750_000_000 }];
 	assert.deepEqual(roundTrip(TelemetryEvent, new TelemetryEvent(samples)), new TelemetryEvent(samples));
 	assert.deepEqual(roundTrip(HostLeavingEvent, new HostLeavingEvent([4, 5])), new HostLeavingEvent([4, 5]));
 	assert.deepEqual(roundTrip(MoveRequest, new MoveRequest(7)), new MoveRequest(7));

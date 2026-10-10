@@ -1,7 +1,7 @@
 import type { InstancePluginContext } from "@clusterio/host";
 import { TelemetryEvent, type Sample } from "./contracts.js";
 import { local } from "./local.js";
-import { REPORT_EVERY, SAMPLE_MS, SaveStalls, cpuMs, sample, type Reading } from "./telemetry.js";
+import { REPORT_EVERY, SAMPLE_MS, SaveStalls, cpuMs, memBytes, sample, type Reading } from "./telemetry.js";
 
 /**
  * The instance plugin (§4.1): every 10 s, game.tick over RCON and the Factorio process's CPU time. The samples go to
@@ -21,7 +21,9 @@ export default async function loadInstancePlugin(context: InstancePluginContext)
 			return undefined; // e.g. Factorio's one-time achievements warning before a save's first Lua command
 		}
 		const pid = instance.server.pid;
-		return { tick, cpuMs: pid ? await cpuMs(pid) : null, at: Date.now() };
+		return {
+			tick, cpuMs: pid ? await cpuMs(pid) : null, mem: pid ? await memBytes(pid) : null, at: Date.now(),
+		};
 	};
 
 	const poll = async () => {

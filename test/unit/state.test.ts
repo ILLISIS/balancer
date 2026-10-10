@@ -13,12 +13,14 @@ test("openState starts empty; save() writes balancer.json as the state is at eac
 	const first = save();
 	state.bad["7:2"] = 1000;
 	state.draining.push(2);
+	state.memory[7] = 2 ** 30;
 	await Promise.all([first, save()]);
 	const again = await openState(dir);
 	assert.deepEqual(again.state, {
 		copies: {}, moves: [], bad: { "7:2": 1000 }, wasRunning: [7], hosts: {}, draining: [2], reference: null,
-	});
-	assert.equal(JSON.parse(await readFile(join(dir, STATE_FILE), "utf8")).schema, 2);
+		memory: { 7: 2 ** 30 },
+	}, "memory amendment §3.1: the figures survive a restart");
+	assert.equal(JSON.parse(await readFile(join(dir, STATE_FILE), "utf8")).schema, 3);
 });
 
 test("schema 1 gains phase 2's fields; its moves an empty pre-flight and check (R2)", async () => {
@@ -31,6 +33,14 @@ test("schema 1 gains phase 2's fields; its moves an empty pre-flight and check (
 	await writeFile(join(dir, STATE_FILE), JSON.stringify({ schema: 1, data: v1 }));
 	const { state } = await openState(dir);
 	assert.deepEqual(state, {
-		...v1, moves: [{ ...move, preflight: null, check: null }], hosts: {}, draining: [], reference: null,
+		...v1, moves: [{ ...move, preflight: null, check: null }], hosts: {}, draining: [], reference: null, memory: {},
 	});
+});
+
+test("schema 2 gains the tiles' memory figures, empty (memory amendment §3.1)", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "balancer-state-"));
+	const v2 = { copies: {}, moves: [], bad: {}, wasRunning: [], hosts: {}, draining: [2], reference: null };
+	await writeFile(join(dir, STATE_FILE), JSON.stringify({ schema: 2, data: v2 }));
+	const { state } = await openState(dir);
+	assert.deepEqual(state, { ...v2, memory: {} });
 });

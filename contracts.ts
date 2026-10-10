@@ -1,11 +1,16 @@
 import * as lib from "@clusterio/lib";
 import { Type, type Static, type TSchema } from "@sinclair/typebox";
 
-/** One 10-s sample (§4.1): when it ended, the UPS over it, the Factorio process's CPU ms per tick (null: unread). */
+/**
+ * One 10-s sample (§4.1): when it ended, the UPS over it, the Factorio process's CPU ms per tick (null: unread), and
+ * its memory figure in bytes (memory amendment §3.1; null: unread). `mem` is optional, so a sample from before it
+ * still validates (MR4).
+ */
 export const SampleSchema = Type.Object({
 	at: Type.Number(),
 	ups: Type.Number(),
 	ms: Type.Union([Type.Number(), Type.Null()]),
+	mem: Type.Optional(Type.Union([Type.Number(), Type.Null()])),
 });
 export type Sample = Static<typeof SampleSchema>;
 

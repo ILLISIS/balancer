@@ -1,10 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { KEEP_MS, SaveStalls, Telemetry, cpuMs, sample } from "../../telemetry.js";
+import { KEEP_MS, SaveStalls, Telemetry, cpuMs, memBytes, memFigure, sample } from "../../telemetry.js";
 
 test("a sample's UPS is the ticks over the time, its ms the CPU time over the ticks (§4.1)", () => {
 	const s = sample({ tick: 1000, cpuMs: 5000, at: 0 }, { tick: 1600, cpuMs: 6200, at: 10_000 });
-	assert.deepEqual(s, { at: 10_000, ups: 60, ms: 2 });
+	assert.deepEqual(s, { at: 10_000, ups: 60, ms: 2, mem: null });
+	const withMem = sample({ tick: 1000, cpuMs: 1, at: 0, mem: 5 }, { tick: 1600, cpuMs: 2, at: 10_000, mem: 7 });
+	assert.equal(withMem?.mem, 7, "memory amendment §3.1: the newer reading's figure");
 	assert.equal(sample({ tick: 1000, cpuMs: null, at: 0 }, { tick: 1300, cpuMs: 9, at: 10_000 })?.ms, null);
 	assert.equal(sample({ tick: 1000, cpuMs: 1, at: 0 }, { tick: 900, cpuMs: 2, at: 10_000 }), undefined, "a restart");
 	assert.equal(sample({ tick: 1000, cpuMs: 1, at: 0 }, { tick: 1000, cpuMs: 2, at: 10_000 }), undefined, "paused");
@@ -14,6 +16,20 @@ test("cpuMs reads this process's CPU time from /proc, and null for a process tha
 	const ms = await cpuMs(process.pid);
 	assert.ok(ms !== null && ms > 0, `got ${ms}`);
 	assert.equal(await cpuMs(2 ** 30), null);
+});
+
+test("memory §3.1: a process's figure is max(VmHWM, VmRSS + VmSwap) in bytes; null with no /proc entry", async () => {
+	const status = (hwm: number, rss: number, swap?: number) => [
+		"Name:\tfactorio", `VmHWM:\t${String(hwm).padStart(8)} kB`, `VmRSS:\t${String(rss).padStart(8)} kB`,
+		...(swap === undefined ? [] : [`VmSwap:\t${String(swap).padStart(8)} kB`]), "Threads:\t12",
+	].join("\n");
+	assert.equal(memFigure(status(719_000, 24_000, 342_000)), 719_000 * 1024, "the peak");
+	assert.equal(memFigure(status(719_000, 407_000, 401_000)), 808_000 * 1024, "resident and swapped beat the peak");
+	assert.equal(memFigure(status(100, 300)), 300 * 1024, "no VmSwap line");
+	assert.equal(memFigure("Name:\tkthreadd\nThreads:\t1\n"), null, "a kernel thread names none");
+	const own = await memBytes(process.pid);
+	assert.ok(own !== null && own > 0, `got ${own}`);
+	assert.equal(await memBytes(2 ** 30), null);
 });
 
 test("the controller keeps 5 minutes: the last sample, the lowest UPS in a window, the last minute's mean ms", () => {

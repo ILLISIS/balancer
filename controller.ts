@@ -55,6 +55,8 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 		logger.error(`balancer: writing balancer.json failed: ${err.message}`);
 	});
 	const telemetry = new Telemetry();
+	/** Memory amendment §3.1: a tile's figure rose since the last pass, which then writes balancer.json (MR5). */
+	let figuresRose = false;
 	const store = new SaveStore(state, path.join(dir, "balancer", "saves"), {
 		pull: (id, name, file) => pull(controller, id, name, file),
 		host: id => controller.instances.get(id)?.config.get("instance.assigned_host") ?? null,
@@ -243,6 +245,12 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 
 	controller.handle(TelemetryEvent, async (event: TelemetryEvent, src: lib.Address) => {
 		telemetry.receive(src.id, event.samples);
+		// Memory amendment §3.1: the largest figure the tile has reported, kept across moves and restarts.
+		const top = Math.max(0, ...event.samples.map(s => s.mem ?? 0));
+		if (top > (state.memory[src.id] ?? 0)) {
+			state.memory[src.id] = top;
+			figuresRose = true;
+		}
 	});
 
 	// §11's manual move: refused unless the tile is empty (B4), has a stored copy and isn't moving already.
@@ -484,6 +492,7 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 		const i = state.wasRunning.indexOf(inst.id);
 		if (inst.status === "deleted") { // C45
 			forget(state.wasRunning, [inst.id]);
+			delete state.memory[inst.id]; // MR6: a gone tile's peak no longer sets the no-figure estimate
 			await store.drop(inst.id);
 		} else if (inst.status === "unknown" && (prev === "running" || prev === "starting") && i === -1) {
 			state.wasRunning.push(inst.id);
@@ -569,6 +578,10 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 		}
 		benchmarks(v); // P4: the join benchmark runs whatever balancer.enabled says
 		moves.pump();
+		if (figuresRose) { // MR5: one write a pass at most
+			figuresRose = false;
+			void persist();
+		}
 	};
 	const timer = setInterval(pass, PASS_MS);
 	controller.hooks.shutdown.attach(plugin.name, async () => {

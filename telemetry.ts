@@ -9,11 +9,13 @@ export const KEEP_MS = 300_000;
 /** ponytail: x86-64 Linux's USER_HZ; read `getconf CLK_TCK` if a host ever differs. */
 const CLK_TCK = 100;
 
-export type Reading = { tick: number; cpuMs: number | null; at: number };
+/** Two readings make a sample; `mem` is the process's memory figure (memory amendment §3.1), null: unread. */
+export type Reading = { tick: number; cpuMs: number | null; at: number; mem?: number | null };
 
 /**
  * A sample from two readings; undefined when the tick or the clock didn't advance (a restarted or paused game).
- * `stallMs`, the time blocking autosaves stalled the tick loop in between, is left out of the elapsed time (P1).
+ * `stallMs`, the time blocking autosaves stalled the tick loop in between, is left out of the elapsed time (P1). Its
+ * memory figure is the newer reading's.
  */
 export function sample(prev: Reading, next: Reading, stallMs = 0): Sample | undefined {
 	const ticks = next.tick - prev.tick;
@@ -22,7 +24,7 @@ export function sample(prev: Reading, next: Reading, stallMs = 0): Sample | unde
 		return undefined;
 	}
 	const ms = prev.cpuMs === null || next.cpuMs === null ? null : (next.cpuMs - prev.cpuMs) / ticks;
-	return { at: next.at, ups: ticks * 1000 / elapsed, ms };
+	return { at: next.at, ups: ticks * 1000 / elapsed, ms, mem: next.mem ?? null };
 }
 
 /**
@@ -35,6 +37,26 @@ export async function cpuMs(pid: number): Promise<number | null> {
 		// After "(comm) " the fields count from 3 (state): utime is field 14, stime field 15.
 		const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
 		return (Number(fields[11]) + Number(fields[12])) * 1000 / CLK_TCK;
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Memory amendment §3.1: a process's memory figure from its /proc/<pid>/status text, max(VmHWM, VmRSS + VmSwap) in
+ * bytes. The peak misses pages swapped out before it, so the resident and swapped pages count too. Null when the text
+ * names none of them.
+ */
+export function memFigure(status: string): number | null {
+	const kb = (field: string) => Number(new RegExp(`^${field}:\\s+(\\d+) kB$`, "m").exec(status)?.[1] ?? 0);
+	const bytes = Math.max(kb("VmHWM"), kb("VmRSS") + kb("VmSwap")) * 1024;
+	return bytes > 0 ? bytes : null;
+}
+
+/** A process's memFigure, read beside cpuMs; null where there is no /proc or no such process. */
+export async function memBytes(pid: number): Promise<number | null> {
+	try {
+		return memFigure(await fs.readFile(`/proc/${pid}/status`, "utf8"));
 	} catch {
 		return null;
 	}

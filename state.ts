@@ -16,8 +16,8 @@ export type Reference = { instanceId: number; modPackId: number | null; version:
 
 /**
  * balancer.json (§4.3): the copies, the moves (every unfinished one and the last 500 ended: the ledger), the bad pairs
- * ("<instance>:<host>" → until, ms), the instances that were running when their host went (§5.3), and phase 2's hosts,
- * draining hosts and default reference (R2).
+ * ("<instance>:<host>" → until, ms), the instances that were running when their host went (§5.3), phase 2's hosts,
+ * draining hosts and default reference (R2), and each tile's memory figure (memory amendment §3.1).
  */
 export type State = {
 	copies: Record<string, Copy>;
@@ -27,6 +27,8 @@ export type State = {
 	hosts: Record<string, HostState>;
 	draining: number[];
 	reference: Reference | null;
+	/** Memory amendment §3.1: each tile's largest reported memory figure, bytes, by instance id. */
+	memory: Record<string, number>;
 };
 
 /** Migrations of balancer.json. Append; never edit one. */
@@ -40,11 +42,15 @@ const MIGRATIONS: Migration[] = [
 		reference: null,
 		moves: data.moves.map((m: object) => ({ ...m, preflight: null, check: null })),
 	}),
+	// 2 → 3 (memory amendment §3.1): each tile's largest memory figure.
+	data => ({ ...data, memory: {} }),
 ];
 export const STATE_FILE = "balancer.json";
 
 export function emptyState(): State {
-	return { copies: {}, moves: [], bad: {}, wasRunning: [], hosts: {}, draining: [], reference: null };
+	return {
+		copies: {}, moves: [], bad: {}, wasRunning: [], hosts: {}, draining: [], reference: null, memory: {},
+	};
 }
 
 /**
