@@ -86,10 +86,12 @@ test("every message survives the JSON its link carries", () => {
 		[back.instanceId, back.streamId, back.modPack.name, back.factorioVersion, back.ticks],
 		[7, "ab12", "v2-dev", "2.1.21", 1800],
 	);
-	const withPack = new HostBenchmarkRequest("cd34", pack, "2.1.21");
+	const withPack = new HostBenchmarkRequest("cd34", pack, "2.1.21", 4);
 	const bench = roundTrip(HostBenchmarkRequest, withPack) as HostBenchmarkRequest;
-	assert.deepEqual([bench.streamId, bench.modPack?.name, bench.factorioVersion], ["cd34", "v2-dev", "2.1.21"]);
-	const vanilla = new HostBenchmarkRequest("cd34", null, "latest");
+	assert.deepEqual(
+		[bench.streamId, bench.modPack?.name, bench.factorioVersion, bench.maxCopies], ["cd34", "v2-dev", "2.1.21", 4],
+	);
+	const vanilla = new HostBenchmarkRequest("cd34", null, "latest", 0);
 	assert.deepEqual(roundTrip(HostBenchmarkRequest, vanilla), vanilla);
 });
 

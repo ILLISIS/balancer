@@ -111,7 +111,24 @@ test("the join benchmark (§5.7, R6): a probe sets the ticks; copies up to the c
 	assert.equal(new Set(runs.map(r => r.dir)).size, 8, "each copy in its own folder");
 	runs.length = 0;
 	assert.equal((await joinBenchmark(b, dir, 3, run)).slots, 2);
-	assert.deepEqual(runs.map(r => basename(r.dir)), ["probe", "1-0", "2-0", "2-1"], "stops at the core count");
+	assert.deepEqual(
+		runs.map(r => basename(r.dir)), ["probe", "1-0", "2-0", "2-1"], "stops at max: the cores, or fewer by memory",
+	);
+});
+
+test("memory §3.4 (M7): the join benchmark runs only the counts that fit; none throws before the probe", async () => {
+	const dir = await temp();
+	const runs: string[] = [];
+	const run = async (b: Bench) => {
+		runs.push(basename(b.dir));
+		return 0.5;
+	};
+	const b = { bin: "/f", data: "/d", mods: "/m", save: "/s.zip" };
+	assert.equal((await joinBenchmark(b, dir, 2, run)).slots, 2);
+	assert.deepEqual(runs, ["probe", "1-0", "2-0", "2-1"], "maxCopies 2: 1 and 2 copies only");
+	runs.length = 0;
+	await assert.rejects(joinBenchmark(b, dir, 0, run), /no memory room for one copy/);
+	assert.deepEqual(runs, [], "nothing ran, not even the probe");
 });
 
 test("a failing copy doesn't end the join benchmark until its siblings have finished", async () => {

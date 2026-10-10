@@ -112,8 +112,12 @@ export default async function loadHostPlugin(context: HostPluginContext) {
 		try {
 			const run = await prepare(dir, request.streamId, request.modPack, request.factorioVersion);
 			const cores = os.availableParallelism();
-			const r = await joinBenchmark(run, path.join(dir, "runs"), cores);
-			const fields = { speed: r.speed, slots: r.slots, cores, runs: r.runs, wall_ms: Date.now() - started };
+			// Memory amendment §3.4 (M7): no more copies than the controller found room for.
+			const r = await joinBenchmark(run, path.join(dir, "runs"), Math.min(cores, request.maxCopies));
+			const fields = {
+				speed: r.speed, slots: r.slots, cores, max_copies: request.maxCopies, runs: r.runs,
+				wall_ms: Date.now() - started,
+			};
 			lifecycle(logger, "balancer.benchmark", "ran", fields);
 			return { ...r, cores };
 		} finally {

@@ -352,12 +352,13 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 	 * balancer.busy_tile_ms or more), with that tile's mod pack and Factorio version, frozen at its first need.
 	 * Undefined while there is none.
 	 */
-	const reference = async (): Promise<
-		{ file: string; modPack: lib.ModPack | null; version: string; key: string } | undefined
-	> => {
+	/** A reference to run: its file, mod pack, Factorio version and key, and its tile (null: the operator's file). */
+	type Ref = { file: string; modPack: lib.ModPack | null; version: string; key: string; instanceId: number | null };
+	const reference = async (): Promise<Ref | undefined> => {
 		const set = config.get("balancer.reference_save");
 		if (set) {
-			return { file: path.resolve(set), modPack: null, version: "latest", key: `file:${path.resolve(set)}` };
+			const file = path.resolve(set);
+			return { file, modPack: null, version: "latest", key: `file:${file}`, instanceId: null };
 		}
 		if (!state.reference) {
 			const ms = (id: number) => telemetry.meanMs(id) ?? 0;
@@ -382,7 +383,7 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 		if (modPack === undefined) {
 			throw new Error(`the reference's mod pack ${modPackId} no longer exists`);
 		}
-		return { file: referenceFile, modPack, version, key: `tile:${instanceId}` };
+		return { file: referenceFile, modPack, version, key: `tile:${instanceId}`, instanceId };
 	};
 	/**
 	 * §5.7: stream the reference to the host (per run) and run the join benchmark there; record its speed and slots.
@@ -397,11 +398,17 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 			if (!ref) {
 				throw new Error("no reference save yet");
 			}
-			lifecycle(logger, "balancer.benchmark", "started", { host: hostId, reference: ref.key, operator });
+			// Memory amendment §3.4 (M7): as many copies as fit, every tile on the host counted; 0 fails on the host,
+			// which stays unbenchmarked (MR13).
+			const f = memoryFacts();
+			const maxCopies = Math.max(0, Math.floor(room(f, hostId, null) / need(f.figures, ref.instanceId)));
+			lifecycle(logger, "balancer.benchmark", "started", {
+				host: hostId, reference: ref.key, operator, max_copies: maxCopies,
+			});
 			const stream = proxyStream(controller, { path: ref.file, size: (await fs.stat(ref.file)).size });
 			try {
 				const r = await controller.sendTo(
-					{ hostId }, new HostBenchmarkRequest(stream.id, ref.modPack, ref.version),
+					{ hostId }, new HostBenchmarkRequest(stream.id, ref.modPack, ref.version, maxCopies),
 				);
 				const host = state.hosts[hostId] ?? {};
 				const version = versions.get(hostId) ?? "unknown";

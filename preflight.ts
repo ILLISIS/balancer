@@ -99,7 +99,7 @@ export async function benchmark(b: Bench, timeoutMs = 600_000): Promise<number> 
 	return avg;
 }
 
-/** §5.7: the counts of copies run at once, stopping at the core count. */
+/** §5.7: the counts of copies run at once, up to joinBenchmark's max. */
 const COPIES = [1, 2, 4, 8];
 /** §5.7's "about 30 s each". */
 const RUN_MS = 30_000;
@@ -108,18 +108,22 @@ const WITHIN = 1.25;
 
 /**
  * The join benchmark (§5.7, R6) on `b.save`, in folders under `dir`. --benchmark runs flat out (spike 32), so a
- * 1800-tick probe first sets the ticks for about 30 s. Then each count of copies runs at once, its ms per tick the
- * slowest copy's, until one is beyond 1.25× a single copy's. speed: one copy's ms per tick; slots: the last count
- * within.
+ * 1800-tick probe first sets the ticks for about 30 s. Then each count of copies up to `max` (the cores, or fewer when
+ * memory has room for fewer: memory amendment §3.4, M7) runs at once, its ms per tick the slowest copy's, until one is
+ * beyond 1.25× a single copy's. speed: one copy's ms per tick; slots: the last count within. Throws before the probe,
+ * itself a copy, when `max` is below 1 (MR12).
  */
 export async function joinBenchmark(
-	b: Omit<Bench, "ticks" | "dir">, dir: string, cores: number, run: (b: Bench) => Promise<number> = benchmark,
+	b: Omit<Bench, "ticks" | "dir">, dir: string, max: number, run: (b: Bench) => Promise<number> = benchmark,
 ): Promise<{ speed: number; slots: number; runs: { copies: number; msPerTick: number }[] }> {
+	if (max < 1) {
+		throw new Error("no memory room for one copy of the reference (balancer.memory_limit_pct)");
+	}
 	const probe = await run({ ...b, ticks: 1800, dir: path.join(dir, "probe") });
 	// ponytail: a floor of 0.01 ms keeps an empty map's "avg: 0.000 ms" from asking for endless ticks.
 	const ticks = Math.max(1800, Math.round(RUN_MS / Math.max(probe, 0.01)));
 	const runs: { copies: number; msPerTick: number }[] = [];
-	for (const copies of COPIES.filter(n => n <= cores)) {
+	for (const copies of COPIES.filter(n => n <= max)) {
 		// Every copy finishes before one's failure is rethrown, so the caller's cleanup never runs under a live child.
 		const settled = await Promise.allSettled(Array.from({ length: copies }, (_, i) => (
 			run({ ...b, ticks, dir: path.join(dir, `${copies}-${i}`) })

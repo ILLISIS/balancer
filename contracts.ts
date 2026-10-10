@@ -247,7 +247,8 @@ export class HostMemoryEvent {
 
 /**
  * Controller → host (§5.7): download the stream's reference save and run the join benchmark on it with `modPack` (null:
- * no mods, P5) on Factorio `factorioVersion`. Answers the speed, the slots, the cores and each count's ms per tick.
+ * no mods, P5) on Factorio `factorioVersion`, at most `maxCopies` copies at once (memory amendment §3.4, M7). Answers
+ * the speed, the slots, the cores and each count's ms per tick.
  */
 export class HostBenchmarkRequest {
 	declare ["constructor"]: typeof HostBenchmarkRequest;
@@ -256,17 +257,23 @@ export class HostBenchmarkRequest {
 	static dst = "host" as const;
 	static plugin = "balancer" as const;
 
-	constructor(public streamId: string, public modPack: lib.ModPack | null, public factorioVersion: string) { }
+	constructor(
+		public streamId: string,
+		public modPack: lib.ModPack | null,
+		public factorioVersion: string,
+		public maxCopies: number,
+	) { }
 
 	static jsonSchema = Type.Object({
 		streamId: Type.String(),
 		modPack: nullable(lib.ModPack.jsonSchema),
 		factorioVersion: Type.String(),
+		maxCopies: Type.Integer(),
 	});
 
 	static fromJSON(json: Static<typeof HostBenchmarkRequest.jsonSchema>) {
 		const modPack = json.modPack === null ? null : lib.ModPack.fromJSON(json.modPack);
-		return new this(json.streamId, modPack, json.factorioVersion);
+		return new this(json.streamId, modPack, json.factorioVersion, json.maxCopies);
 	}
 
 	static Response = lib.plainJson(Type.Object({
