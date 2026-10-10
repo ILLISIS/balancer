@@ -13,6 +13,14 @@ type Move = Status["moves"][number];
 const REFRESH_MS = 10_000;
 const fixed = (n: number | null, digits: number) => (n === null ? "-" : n.toFixed(digits));
 const ended = (m: Move) => m.step === "done" || m.step === "failed";
+const gb = (bytes: number) => `${(Math.max(0, bytes) / 2 ** 30).toFixed(1)} GB`;
+
+/** Memory amendment §3.2: the memory in use against the host's limit, and its room for a new tile. */
+function memory(h: Host): string {
+	return h.usedPct === null
+		? `no reading; limit ${h.limitPct}%`
+		: `${h.usedPct.toFixed(0)}% of ${h.limitPct}%; room ${gb(h.room)}`;
+}
 
 /** A move's outcome: its step, with its error; a finished way back shows why it came back (C13, C30). */
 function result(m: Move): string {
@@ -36,8 +44,9 @@ function check(m: Move): string {
 }
 
 /**
- * §4.4: the hosts (connected or gone, speed, slots, busy tiles, the drain toggle, "benchmark now"), the tiles (host,
- * UPS, CPU ms per tick, players, the save copy's age, and a Move control), and the moves: in progress and the ledger.
+ * §4.4: the hosts (connected or gone, speed, slots, busy tiles, memory, the drain toggle, "benchmark now"), the
+ * tiles (host, UPS, CPU ms per tick, memory need, players, the save copy's age, and a Move control), and the moves:
+ * in progress and the ledger.
  */
 function BalancerPage() {
 	const control = useContext(ControlContext);
@@ -104,6 +113,7 @@ function BalancerPage() {
 				},
 				{ title: "Busy tiles", key: "busy", render: (_, h) => h.busy },
 				{ title: "Tiles", key: "tiles", render: (_, h) => tileCount(h) },
+				{ title: "Memory", key: "memory", render: (_, h) => memory(h) },
 				{
 					title: "Drain",
 					key: "drain",
@@ -136,6 +146,7 @@ function BalancerPage() {
 				{ title: "Status", key: "status", render: (_, t) => t.status },
 				{ title: "UPS", key: "ups", render: (_, t) => fixed(t.ups, 1) },
 				{ title: "ms/tick", key: "ms", render: (_, t) => fixed(t.ms, 2) },
+				{ title: "Need", key: "need", render: (_, t) => gb(t.need) },
 				{ title: "Players", key: "players", render: (_, t) => t.players },
 				{ title: "Save copy", key: "copy", render: (_, t) => age(t) },
 				{

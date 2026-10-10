@@ -87,6 +87,13 @@ export const StatusSchema = Type.Object({
 		busy: Type.Integer(),
 		draining: Type.Boolean(),
 		benchmarking: Type.Boolean(),
+		/**
+		 * Memory amendment §3.2: the percent of its memory in use (null: no reading 60 s old or newer), its
+		 * balancer.memory_limit_pct, and its room for a new tile in bytes (negative over the limit).
+		 */
+		usedPct: nullable(Type.Number()),
+		limitPct: Type.Number(),
+		room: Type.Number(),
 	})),
 	tiles: Type.Array(Type.Object({
 		id: Type.Integer(),
@@ -99,6 +106,8 @@ export const StatusSchema = Type.Object({
 		players: Type.Integer(),
 		/** The copy's save time on its host (its pull time until the new host saves); null without a copy. */
 		copyMtimeMs: nullable(Type.Number()),
+		/** Memory amendment §3.1: its need, bytes: its figure × 1.2, or the no-figure estimate. */
+		need: Type.Number(),
 	})),
 	moves: Type.Array(MoveSchema),
 });

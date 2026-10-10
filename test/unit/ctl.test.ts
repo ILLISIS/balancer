@@ -13,7 +13,7 @@ test("balancer status prints a line per host, per instance, then per move", () =
 	const now = 1_000_000;
 	const host = {
 		id: 1, name: "dev", connected: true, goneSinceMs: null, speed: 0.438, slots: 3, learned: true, busy: 2,
-		draining: false, benchmarking: false,
+		draining: false, benchmarking: false, usedPct: 64, limitPct: 90, room: 2 ** 30,
 	};
 	const s: Status = {
 		hosts: [host, {
@@ -22,9 +22,9 @@ test("balancer status prints a line per host, per instance, then per move", () =
 		}],
 		tiles: [
 			{ id: 7, name: "gridworld_0_0", host: 1, status: "running", ups: 59.96, ms: 1.234, players: 0,
-				copyMtimeMs: now - 180_000 },
+				copyMtimeMs: now - 180_000, need: 2 ** 30 },
 			{ id: 8, name: "t-1", host: null, status: "unassigned", ups: null, ms: null, players: 2,
-				copyMtimeMs: null },
+				copyMtimeMs: null, need: 2 ** 30 },
 		],
 		moves: [
 			{ ...move, check: { at: 3, ups: 59.9, ms: 3, othersMinUps: 60, ok: true } },

@@ -485,32 +485,39 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 		void runBenchmark(request.hostId, true);
 	});
 
-	controller.handle(StatusRequest, async (): Promise<Status> => ({
-		hosts: [...controller.hosts.values()].map(h => ({
-			id: h.id,
-			name: h.name,
-			connected: h.connected,
-			goneSinceMs: gone.has(h.id) ? wallOf(gone.get(h.id)!) : null,
-			speed: speedOf(h.id),
-			slots: slotsOf(h.id),
-			learned: state.hosts[h.id]?.learned !== undefined,
-			busy: busyOn(h.id),
-			draining: state.draining.includes(h.id),
-			benchmarking: benchmarking.has(h.id),
-		})),
-		tiles: [...controller.instances.values()].map(i => ({
-			id: i.id,
-			name: i.config.get("instance.name"),
-			host: i.config.get("instance.assigned_host"),
-			status: i.status,
-			ups: telemetry.last(i.id)?.ups ?? null,
-			ms: telemetry.meanMs(i.id) ?? null,
-			players: players(i.id),
-			// N2: pulledAt while mtime is 0
-			copyMtimeMs: store.copy(i.id)?.mtimeMs || store.copy(i.id)?.pulledAt || null,
-		})),
-		moves: state.moves,
-	}));
+	controller.handle(StatusRequest, async (): Promise<Status> => {
+		const f = memoryFacts();
+		return {
+			hosts: [...controller.hosts.values()].map(h => ({
+				id: h.id,
+				name: h.name,
+				connected: h.connected,
+				goneSinceMs: gone.has(h.id) ? wallOf(gone.get(h.id)!) : null,
+				speed: speedOf(h.id),
+				slots: slotsOf(h.id),
+				learned: state.hosts[h.id]?.learned !== undefined,
+				busy: busyOn(h.id),
+				draining: state.draining.includes(h.id),
+				benchmarking: benchmarking.has(h.id),
+				usedPct: usedPct(f, h.id),
+				limitPct: limitPct(f, h.id),
+				room: room(f, h.id, null),
+			})),
+			tiles: [...controller.instances.values()].map(i => ({
+				id: i.id,
+				name: i.config.get("instance.name"),
+				host: i.config.get("instance.assigned_host"),
+				status: i.status,
+				ups: telemetry.last(i.id)?.ups ?? null,
+				ms: telemetry.meanMs(i.id) ?? null,
+				players: players(i.id),
+				// N2: pulledAt while mtime is 0
+				copyMtimeMs: store.copy(i.id)?.mtimeMs || store.copy(i.id)?.pulledAt || null,
+				need: need(f.figures, i.id),
+			})),
+			moves: state.moves,
+		};
+	});
 
 	// §5.1: copy every newer save.
 	controller.saves.on("update", (saves: lib.SaveDetails[]) => store.updated(saves));
