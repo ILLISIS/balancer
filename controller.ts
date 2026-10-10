@@ -309,13 +309,14 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 		if (to !== undefined && (to === from || !port.hostConnected(to))) {
 			throw refuse(to === from ? `it is on host ${to} already` : `host ${to} is not connected`);
 		}
-		// Memory amendment §3.4 (M5): no override; an operator who wants it anyway raises the host's
-		// balancer.memory_limit_pct.
+		// Memory amendment §3.4 (M5, reversed by the owner, 2026-10-10): a manual move to a host without room goes
+		// ahead with a warning. Failover and automatic moves stay strict.
 		const why = to === undefined ? undefined : noRoom(memoryFacts(), inst.id, to);
-		if (why !== undefined) {
-			throw refuse(why);
-		}
 		const m = moves.add({ instanceId: inst.id, from, to, reason: "manual", wasRunning: inst.status === "running" });
+		if (why !== undefined) {
+			lifecycle(logger, "balancer.move", "memory_override", { instance: inst.id, host: to, why }, "warn");
+			return { moveId: m.id, warning: `${inst.config.get("instance.name")}: ${why}; moving anyway` };
+		}
 		return { moveId: m.id };
 	});
 

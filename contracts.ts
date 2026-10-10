@@ -182,7 +182,7 @@ export class MoveRequest {
 		return new this(json.instanceId, json.hostId);
 	}
 
-	static Response = lib.plainJson(Type.Object({ moveId: Type.String() }));
+	static Response = lib.plainJson(Type.Object({ moveId: Type.String(), warning: Type.Optional(Type.String()) }));
 }
 
 /** Control → controller: hosts, tiles and moves, for the page and `clusterioctl balancer status`. */

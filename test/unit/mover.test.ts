@@ -493,13 +493,12 @@ test("a draining host's stopped tile goes by steps 3–5: no pre-flight, no copy
 	assert.deepEqual(f.runs, [false], "memory §3.4: a stopped tile's drain runs nothing there (Review Focus 2)");
 });
 
-test("memory §3.4 (M5): a pinned move whose host lost room fails before pre-flight; no pair marked bad", async () => {
+test("memory §3.4 (M5): a pinned move whose host lost room goes on to the pre-flight with a warning", async () => {
 	const f = fake();
 	f.roomless.add(2);
 	const m = f.mover.add({ instanceId: 7, ...manual, to: 2 });
 	await settle();
-	assert.deepEqual([m.step, m.error], ["failed", "host 2 has room for 0 MB, it needs 1229 MB"]);
-	assert.deepEqual(f.calls, [], "no pre-flight; T was never stopped");
-	assert.deepEqual(f.bad, {});
-	assert.equal(f.status.get(7), "running");
+	assert.deepEqual([m.step, m.error], ["done", null]);
+	assert.ok(f.calls.includes("assign 7 2"), "the move proceeded to host 2");
+	assert.ok(f.phases.includes("memory_override"), "and logged the override");
 });

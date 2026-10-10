@@ -1,5 +1,5 @@
 import React, { useCallback, useContext, useEffect, useState } from "react";
-import { Button, Select, Space, Switch, Table, type TableColumnsType } from "antd";
+import { Button, Select, message, Space, Switch, Table, type TableColumnsType } from "antd";
 import {
 	ControlContext, PageHeader, PageLayout, notifyErrorHandler, useAccount, type WebPluginContext,
 } from "@clusterio/web_ui";
@@ -65,7 +65,12 @@ function BalancerPage() {
 	}, [load]);
 
 	function move(t: Tile) {
-		control.send(new MoveRequest(t.id, targets[t.id])).then(load).catch(notifyErrorHandler("The move was refused"));
+		control.send(new MoveRequest(t.id, targets[t.id])).then(r => {
+			if (r.warning) {
+				message.warning(r.warning);
+			}
+			load();
+		}).catch(notifyErrorHandler("The move was refused"));
 	}
 	function drain(h: Host, on: boolean) {
 		control.send(new DrainRequest(h.id, on)).then(load).catch(notifyErrorHandler("The drain toggle failed"));

@@ -80,7 +80,10 @@ balancerCommands.add(new lib.Command({
 	handler: async (args: { instance: string; to?: string }, control: lib.Link) => {
 		const instanceId = await lib.resolveInstance(control, args.instance);
 		const hostId = args.to === undefined ? undefined : await lib.resolveHost(control, args.to);
-		const { moveId } = await control.send(new MoveRequest(instanceId, hostId));
+		const { moveId, warning } = await control.send(new MoveRequest(instanceId, hostId));
+		if (warning) {
+			process.stderr.write(`${warning}\n`);
+		}
 		out(moveId);
 	},
 }));

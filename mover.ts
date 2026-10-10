@@ -226,11 +226,11 @@ export class Mover {
 			to = free;
 			m.to = to;
 		} else if (m.pinned) {
-			// Memory amendment §3.4 (M5): the operator's host is checked again just before its pre-flight; a host that
-			// lost room ends the move with the reason, and no pair is marked bad.
+			// Memory amendment §3.4 (M5, reversed by the owner, 2026-10-10): the operator's host without room is
+			// logged and the move goes on; the pre-flight and the after-check still decide.
 			const why = this.port.noRoom(id, to);
 			if (why !== undefined) {
-				return this.end(m, "failed", why);
+				this.port.log("memory_override", m, { why }, "warn");
 			}
 		}
 		if (!m.tried.includes(to)) {
