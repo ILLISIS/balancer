@@ -25,7 +25,7 @@ function deferred() {
  * A fake cluster: hosts 1–3 connected; instances 7 and 8 running on host 1, with no players; every game at tick 100.
  * Each call is recorded as text in `calls`, and in `trail` with "saved <step>" for each persist. A call whose text is
  * in `failing` throws, and a pre-flight in `failing` fails. `gates` holds a host's pre-flights until the test opens
- * them.
+ * them. `roomless` hosts have no memory room; `runs` records each candidates call's `runs` flag.
  */
 function fake(config: Partial<MoverConfig> = {}, resumed = true) {
 	const calls: string[] = [];
@@ -35,6 +35,8 @@ function fake(config: Partial<MoverConfig> = {}, resumed = true) {
 	const failing = new Set<string>();
 	const keepRunning = new Set<number>();
 	const gates = new Map<number, Promise<void>>();
+	const roomless = new Set<number>();
+	const runs: boolean[] = [];
 	const hosts = new Map([[1, true], [2, true], [3, true]]);
 	const status = new Map<number, string>([[7, "running"], [8, "running"]]);
 	const state = { now: 1_000_000, players: 0, copy: true };
@@ -50,7 +52,11 @@ function fake(config: Partial<MoverConfig> = {}, resumed = true) {
 	const port: MoverPort = {
 		now: () => state.now,
 		wait: async () => undefined,
-		candidates: (_id, from) => [2, 3].filter(h => h !== from && hosts.get(h)),
+		candidates: (_id, from, _reason, run) => {
+			runs.push(run);
+			return [2, 3].filter(h => h !== from && hosts.get(h));
+		},
+		noRoom: (_id, h) => (roomless.has(h) ? `host ${h} has room for 0 MB, it needs 1229 MB` : undefined),
 		hostConnected: h => hosts.get(h) ?? false,
 		status: id => status.get(id) ?? "stopped",
 		players: () => state.players,
@@ -108,6 +114,7 @@ function fake(config: Partial<MoverConfig> = {}, resumed = true) {
 	}
 	return {
 		port, keepRunning, mover, calls, trail, phases, finished, failing, gates, hosts, status, state, moves, bad,
+		roomless, runs,
 	};
 }
 
@@ -128,6 +135,7 @@ test("a manual move: pre-flight the best target, then stop, pull, assign, push, 
 	assert.deepEqual([m.step, m.to, m.save, m.tick, m.endedAt], ["done", 2, "balancer.zip", 100, 1_000_000]);
 	assert.equal(f.mover.moving(7), false);
 	assert.deepEqual(f.finished, [m.id]);
+	assert.deepEqual(f.runs, [true], "memory §3.4: a running tile's targets need room");
 });
 
 test("every step is written to balancer.json before it runs (§4.3)", async () => {
@@ -482,4 +490,16 @@ test("a draining host's stopped tile goes by steps 3–5: no pre-flight, no copy
 	await settle();
 	assert.deepEqual(f.calls, ["pull 7 world.zip", "assign 7 2", "push 7"]);
 	assert.deepEqual([m.step, m.to, m.preflight], ["done", 2, null]);
+	assert.deepEqual(f.runs, [false], "memory §3.4: a stopped tile's drain runs nothing there (Review Focus 2)");
+});
+
+test("memory §3.4 (M5): a pinned move whose host lost room fails before pre-flight; no pair marked bad", async () => {
+	const f = fake();
+	f.roomless.add(2);
+	const m = f.mover.add({ instanceId: 7, ...manual, to: 2 });
+	await settle();
+	assert.deepEqual([m.step, m.error], ["failed", "host 2 has room for 0 MB, it needs 1229 MB"]);
+	assert.deepEqual(f.calls, [], "no pre-flight; T was never stopped");
+	assert.deepEqual(f.bad, {});
+	assert.equal(f.status.get(7), "running");
 });

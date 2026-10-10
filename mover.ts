@@ -9,9 +9,15 @@ export type MoverPort = {
 	now(): number;
 	/** The pause between retries of steps 4–6. */
 	wait(ms: number): Promise<void>;
-	/** Eligible targets, best first (§5.8 in phase 1); the mover drops the tried, bad and busy ones. */
-	candidates(instanceId: number, from: number | null, reason: Move["reason"]): number[];
+	/**
+	 * Eligible targets, best first (§5.8 in phase 1); the mover drops the tried, bad and busy ones. `runs`: the tile
+	 * will run on the target, so it must fit there in memory (memory amendment §3.4); false only for a stopped tile's
+	 * drain.
+	 */
+	candidates(instanceId: number, from: number | null, reason: Move["reason"], runs: boolean): number[];
 	hostConnected(hostId: number): boolean;
+	/** Memory amendment §3.3 (MR2): undefined when the instance fits on the host in memory; else why not. */
+	noRoom(instanceId: number, hostId: number): string | undefined;
 	status(instanceId: number): string;
 	players(instanceId: number): number;
 	/** The save the running instance loaded, which its stop writes; else its newest file save. */
@@ -205,7 +211,8 @@ export class Mover {
 		let to = m.to;
 		if (to === null) {
 			const now = this.port.now();
-			const left = this.port.candidates(id, m.from, m.reason)
+			// Memory amendment §3.4: a stopped tile's drain runs nothing on the target, so it needs no room (MR3).
+			const left = this.port.candidates(id, m.from, m.reason, !reassign)
 				.filter(h => !m.tried.includes(h) && (this.bad[`${id}:${h}`] ?? 0) <= now);
 			if (left.length === 0) {
 				const why = m.tried.length > 0 ? "every target failed its pre-flight" : "no eligible target";
@@ -218,6 +225,13 @@ export class Mover {
 			}
 			to = free;
 			m.to = to;
+		} else if (m.pinned) {
+			// Memory amendment §3.4 (M5): the operator's host is checked again just before its pre-flight; a host that
+			// lost room ends the move with the reason, and no pair is marked bad.
+			const why = this.port.noRoom(id, to);
+			if (why !== undefined) {
+				return this.end(m, "failed", why);
+			}
 		}
 		if (!m.tried.includes(to)) {
 			m.tried.push(to);

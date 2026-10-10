@@ -3,8 +3,11 @@
 export interface BalancerApi {
 	/** A move of this instance is queued or in progress: gridworld neither starts, stops nor assigns it (§8). */
 	moving(instanceId: number): boolean;
-	/** The host is draining (§5.4): gridworld's round-robin skips it (§8). */
-	draining(hostId: number): boolean;
+	/**
+	 * Gridworld may place a new tile on the host: it isn't draining (§5.4), and a new tile's need fits its room (memory
+	 * amendment §3.6). Gridworld's round-robin skips the others (§8).
+	 */
+	accepts(hostId: number): boolean;
 	/** Runs after each move ends, done or failed; returns the unsubscribe. */
 	onMoveFinished(listener: (instanceId: number) => void): () => void;
 }

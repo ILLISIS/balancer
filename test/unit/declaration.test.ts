@@ -96,7 +96,7 @@ test("every message survives the JSON its link carries", () => {
 test("balancerApi() throws until the controller plugin sets it: the edgeApi pattern (§4.5)", () => {
 	setBalancerApi(undefined);
 	assert.throws(() => balancerApi(), /the API is not ready/);
-	const api = { moving: () => true, draining: () => false, onMoveFinished: () => () => undefined };
+	const api = { moving: () => true, accepts: () => true, onMoveFinished: () => () => undefined };
 	setBalancerApi(api);
 	assert.equal(balancerApi(), api);
 	setBalancerApi(undefined);

@@ -14,7 +14,9 @@ import { RETRY_FAILED_MS, adoptOrphans, failovers, forget, goneHosts, wasRunning
 import { Mover, type MoverPort } from "./mover.js";
 import { openState } from "./state.js";
 import { SaveStore, copyable } from "./store.js";
-import { candidates, failoverCandidates, predictedMs, verdict } from "./targets.js";
+import {
+	accepts, candidates, failoverCandidates, mb, need, noRoom, predictedMs, room, verdict, type MemoryFacts,
+} from "./targets.js";
 import { SAMPLE_MS, Telemetry } from "./telemetry.js";
 import { proxyStream, pull, push } from "./transfer.js";
 
@@ -33,12 +35,12 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 	const { controller, logger, plugin } = context;
 	// §4.5: set before the first await, so gridworld's first pass can find it; it answers once the moves are loaded.
 	let mover: Mover | undefined;
-	/** state.draining once loaded; the drain handler edits that array in place. */
-	let draining: number[] = [];
+	/** Memory amendment §3.6: false until balancer.json is loaded; room fails closed (MR11). */
+	let accepting: (hostId: number) => boolean = () => false;
 	const listeners = new Set<(instanceId: number) => void>();
 	setBalancerApi({
 		moving: id => mover?.moving(id) ?? false,
-		draining: id => draining.includes(id),
+		accepts: id => accepting(id),
 		onMoveFinished: listener => {
 			listeners.add(listener);
 			return () => {
@@ -50,7 +52,6 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 	const config = controller.config;
 	const dir = path.resolve(config.get("controller.database_directory"));
 	const { state, save } = await openState(dir);
-	draining = state.draining;
 	const persist = () => save().catch((err: Error) => {
 		logger.error(`balancer: writing balancer.json failed: ${err.message}`);
 	});
@@ -111,30 +112,56 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 		config.get("balancer.ups_floor"), config.get("balancer.busy_tile_ms"), fits,
 	);
 
+	/** Memory amendment §3.1–§3.3: what the memory rule reads now (MR1). */
+	const memoryFacts = (): MemoryFacts => ({
+		now: Date.now(),
+		figures: state.memory,
+		memory: h => readings.get(h),
+		limits,
+		tiles: tiles(),
+		moves: state.moves,
+	});
+	accepting = h => accepts(memoryFacts(), state.draining, h);
+
 	const port: MoverPort = {
 		now: Date.now,
 		wait: ms => sleep(ms),
-		candidates: (id, from, reason) => {
+		candidates: (id, from, reason, runs) => {
 			const floor = config.get("balancer.ups_floor");
+			const f = memoryFacts();
+			// Memory amendment §3.3–§3.4: a tile that will run on the target must fit there, for every reason; a
+			// stopped tile's drain runs nothing (MR3).
+			const roomy = (h: number) => !runs || noRoom(f, id, h) === undefined;
 			if (reason === "failover") {
-				return failoverCandidates(
+				const ranked = (fits?: (hostId: number) => boolean) => failoverCandidates(
 					from, hostFacts(), tiles(), i => telemetry.last(i), i => telemetry.meanMs(i), floor,
-					config.get("balancer.failover_floor"), config.get("balancer.busy_tile_ms"),
+					config.get("balancer.failover_floor"), config.get("balancer.busy_tile_ms"), fits,
 				);
+				const found = ranked(roomy);
+				if (found.length === 0 && ranked().length > 0) {
+					// M4: memory is a hard gate, best effort or not; the failover is tried again in 10 minutes (MR17).
+					const rooms = hostFacts().filter(h => h.open && h.id !== from)
+						.map(h => [h.id, mb(room(f, h.id, id))]);
+					lifecycle(logger, "balancer.failover", "no_room", {
+						instance: id, need_mb: mb(need(f.figures, id)), room_mb: Object.fromEntries(rooms),
+					}, "warn");
+				}
+				return found;
 			}
-			let fits: ((hostId: number) => boolean) | undefined;
+			let fits = roomy;
 			if (reason === "overload") {
 				const ms = telemetry.meanMs(id);
 				const fromSpeed = from === null ? null : speedOf(from);
 				fits = h => {
 					const toSpeed = speedOf(h);
-					return ms === undefined || fromSpeed === null || toSpeed === null
-						|| predictedMs(ms, fromSpeed, toSpeed) < 1000 / floor;
+					return roomy(h) && (ms === undefined || fromSpeed === null || toSpeed === null
+						|| predictedMs(ms, fromSpeed, toSpeed) < 1000 / floor);
 				};
 			}
 			return strict(from, fits);
 		},
 		hostConnected: h => controller.hosts.get(h)?.connected ?? false,
+		noRoom: (id, hostId) => noRoom(memoryFacts(), id, hostId),
 		status: id => instance(id)?.status ?? "unknown",
 		players,
 		loadedSave: id => {
@@ -280,6 +307,12 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 		}
 		if (to !== undefined && (to === from || !port.hostConnected(to))) {
 			throw refuse(to === from ? `it is on host ${to} already` : `host ${to} is not connected`);
+		}
+		// Memory amendment §3.4 (M5): no override; an operator who wants it anyway raises the host's
+		// balancer.memory_limit_pct.
+		const why = to === undefined ? undefined : noRoom(memoryFacts(), inst.id, to);
+		if (why !== undefined) {
+			throw refuse(why);
 		}
 		const m = moves.add({ instanceId: inst.id, from, to, reason: "manual", wasRunning: inst.status === "running" });
 		return { moveId: m.id };
