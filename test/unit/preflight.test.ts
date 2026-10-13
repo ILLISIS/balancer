@@ -39,18 +39,18 @@ test("modsDir links the pack's mods and writes its mod-list.json and mod-setting
 	const dir = await temp();
 	const hostMods = join(dir, "host-mods");
 	await mkdir(hostMods);
-	await writeFile(join(hostMods, "universal_edges_2.0.0.zip"), "zip");
+	await writeFile(join(hostMods, "universal_edges_2.1.0.zip"), "zip");
 	const pack = new lib.ModPack();
 	pack.name = "v2-dev";
 	pack.factorioVersion = "2.1.21";
-	pack.mods.set("universal_edges", { name: "universal_edges", enabled: true, version: "2.0.0" } as lib.ModRecord);
+	pack.mods.set("universal_edges", { name: "universal_edges", enabled: true, version: "2.1.0" } as lib.ModRecord);
 	const host = {
 		config: { get: (field: string) => (field === "host.mods_directory" ? hostMods : undefined) },
-		fetchMods: async () => [{ filename: "universal_edges_2.0.0.zip" }],
+		fetchMods: async () => [{ filename: "universal_edges_2.1.0.zip" }],
 	} as unknown as Host;
 	await modsDir(host, pack, join(dir, "mods"));
-	const link = join(dir, "mods", "universal_edges_2.0.0.zip");
-	assert.equal(await readlink(link), join(hostMods, "universal_edges_2.0.0.zip"));
+	const link = join(dir, "mods", "universal_edges_2.1.0.zip");
+	assert.equal(await readlink(link), join(hostMods, "universal_edges_2.1.0.zip"));
 	const listText = await readFile(join(dir, "mods", "mod-list.json"), "utf8");
 	const list = JSON.parse(listText) as { mods: { name: string }[] };
 	assert.deepEqual(list.mods.map(m => m.name), ["universal_edges"]);
