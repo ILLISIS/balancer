@@ -2,6 +2,8 @@
 	"name": "balancer",
 	"version": "1.0.0",
 	"description": "Balancer: moves empty tiles between hosts with their saves, fails over gone hosts, fences cut-off ones",
+	"license": "BlueOak-1.0.0",
+	"repository": { "type": "git", "url": "https://github.com/ILLISIS/balancer" },
 	"private": true,
 	"type": "module",
 	"main": "dist/node/index.js",
@@ -14,11 +16,11 @@
 	"peerDependencies": {
 		"@clusterio/controller": "workspace:^",
 		"@clusterio/host": "workspace:^",
-		"@clusterio/lib": "workspace:^"
+		"@clusterio/lib": "workspace:^",
+		"universal_edges": "workspace:^"
 	},
 	"dependencies": {
-		"@sinclair/typebox": "catalog:",
-		"universal_edges": "workspace:*"
+		"@sinclair/typebox": "catalog:"
 	},
 	"devDependencies": {
 		"@clusterio/controller": "workspace:^",
@@ -31,6 +33,7 @@
 		"react": "catalog:",
 		"react-dom": "catalog:",
 		"typescript": "catalog:",
+		"universal_edges": "workspace:^",
 		"webpack": "catalog:",
 		"webpack-cli": "catalog:",
 		"webpack-merge": "catalog:"
