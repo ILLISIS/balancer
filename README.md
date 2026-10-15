@@ -7,6 +7,7 @@ Moves empty tiles between Clusterio hosts with their saves, fails over the tiles
 - Clusterio built from source, master at commit `4c0c89c` or later. 2.0.0-alpha.27, the latest release, lacks APIs this uses, and before `4c0c89c` the plugins' web pages don't load.
 - Node 22 or later, and pnpm at the version in Clusterio's `packageManager`.
 - Universal Edges v2, cloned next to it (`external_plugins/universal_edges`).
+- `zip` (Universal Edges' mod build).
 
 ## Install
 
