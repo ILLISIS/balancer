@@ -14,7 +14,7 @@ Moves empty tiles between Clusterio hosts with their saves, fails over the tiles
 In a Clusterio checkout:
 
 ```sh
-git clone -b v2 https://github.com/clusterio/universal_edges.git external_plugins/universal_edges
+git clone -b v2 https://github.com/ILLISIS/universal_edges.git external_plugins/universal_edges
 git clone https://github.com/ILLISIS/balancer.git external_plugins/balancer
 pnpm install
 pnpm build
