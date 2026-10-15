@@ -9,7 +9,7 @@
 		".": "./dist/node/index.js",
 		"./api": "./dist/node/api.js"
 	},
-	"scripts": { "prepare": "tsc --build && webpack-cli --mode production", "test": "node --test \"dist/node/test/unit/**/*.test.js\"" },
+	"scripts": { "lint": "eslint --max-warnings 0 .", "prepare": "tsc --build && webpack-cli --mode production", "test": "node --test \"dist/node/test/unit/**/*.test.js\"" },
 	"engines": { "node": ">=22" },
 	"peerDependencies": {
 		"@clusterio/controller": "workspace:^",
