@@ -289,11 +289,11 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 	controller.handle(MoveRequest, async (request: MoveRequest) => {
 		const inst = instance(request.instanceId);
 		if (!inst) {
-			throw new lib.RequestError(`instance ${request.instanceId} does not exist`);
+			throw new lib.NotFoundError(`instance ${request.instanceId} does not exist`);
 		}
 		const from = inst.config.get("instance.assigned_host");
 		const to = request.hostId;
-		const refuse = (why: string) => new lib.RequestError(`${inst.config.get("instance.name")} can't move: ${why}`);
+		const refuse = (why: string) => new lib.ConflictError(`${inst.config.get("instance.name")} can't move: ${why}`);
 		if (moves.moving(inst.id)) {
 			throw refuse("it is moving already");
 		}
@@ -323,7 +323,7 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 	// §5.4: the operator's drain toggle. Drain runs whatever balancer.enabled says (P4).
 	controller.handle(DrainRequest, async (request: DrainRequest) => {
 		if (!controller.hosts.get(request.hostId)) {
-			throw new lib.RequestError(`host ${request.hostId} does not exist`);
+			throw new lib.NotFoundError(`host ${request.hostId} does not exist`);
 		}
 		const i = state.draining.indexOf(request.hostId);
 		if (request.on && i === -1) {
@@ -467,15 +467,15 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 	// §5.7's "benchmark now": it runs whatever the host carries (the operator chose), and answers once it has started.
 	controller.handle(BenchmarkRequest, async (request: BenchmarkRequest) => {
 		if (!port.hostConnected(request.hostId)) {
-			throw new lib.RequestError(`host ${request.hostId} is not connected`);
+			throw new lib.UnavailableError(`host ${request.hostId} is not connected`);
 		}
 		if (benchmarking.has(request.hostId)) {
-			throw new lib.RequestError(`host ${request.hostId} is running its benchmark already`);
+			throw new lib.ConflictError(`host ${request.hostId} is running its benchmark already`);
 		}
 		benchmarking.add(request.hostId); // claimed before any await, so no second run can start meanwhile
 		try {
 			if (!await reference()) {
-				throw new lib.RequestError(
+				throw new lib.NotFoundError(
 					"no reference save yet: set balancer.reference_save, or wait until a tile is busy",
 				);
 			}

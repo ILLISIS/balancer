@@ -11,7 +11,7 @@
 		".": "./dist/node/index.js",
 		"./api": "./dist/node/api.js"
 	},
-	"scripts": { "lint": "eslint --max-warnings 0 .", "prepare": "tsc --build && webpack-cli --mode production", "test": "node --test \"dist/node/test/unit/**/*.test.js\"" },
+	"scripts": { "lint": "oxlint -c oxlint.config.mjs --max-warnings 0 .", "prepare": "tsc --build && vite build", "test": "node --test \"dist/node/test/unit/**/*.test.js\"" },
 	"engines": { "node": ">=22" },
 	"peerDependencies": {
 		"@clusterio/controller": "workspace:^",
@@ -34,8 +34,6 @@
 		"react-dom": "catalog:",
 		"typescript": "catalog:",
 		"universal_edges": "workspace:^",
-		"webpack": "catalog:",
-		"webpack-cli": "catalog:",
-		"webpack-merge": "catalog:"
+		"vite": "catalog:"
 	}
 }
