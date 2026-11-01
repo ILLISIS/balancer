@@ -4,7 +4,7 @@ Moves empty tiles between Clusterio hosts with their saves, fails over the tiles
 
 ## Requirements
 
-- Clusterio 2.0, built from source: a checkout of tag `v2.0.2` or later in the 2.0 series. The plugin builds inside Clusterio's pnpm workspace. 2.0.0-alpha.27 and older lack APIs this uses, and Clusterio 2.1 may change the plugin API.
+- Clusterio 2.1, built from source: until 2.1 is tagged, a checkout of `master` (the UE and gridworld org repos follow master too). The plugin builds inside Clusterio's pnpm workspace. It doesn't load on 2.0.x.
 - Node 22 or later, and pnpm at the version in Clusterio's `packageManager`.
 - Universal Edges v2, cloned next to it (`external_plugins/universal_edges`).
 - `zip` (Universal Edges' mod build).
@@ -14,7 +14,7 @@ Moves empty tiles between Clusterio hosts with their saves, fails over the tiles
 In a Clusterio checkout:
 
 ```sh
-git clone -b v2 https://github.com/ILLISIS/universal_edges.git external_plugins/universal_edges
+git clone https://github.com/clusterio/universal_edges.git external_plugins/universal_edges
 git clone https://github.com/ILLISIS/balancer.git external_plugins/balancer
 pnpm install
 pnpm build
@@ -27,11 +27,11 @@ In the plugin list, put balancer before gridworld.
 
 ## Test and lint
 
-Run these from inside the Clusterio checkout, where ESLint is installed:
+Run these from inside the Clusterio checkout, where Oxlint is installed:
 
 ```sh
 pnpm --filter balancer run test   # unit tests; run prepare first
-pnpm --filter balancer run lint   # ESLint with Clusterio's rules
+pnpm --filter balancer run lint   # Oxlint with Clusterio's rules
 ```
 
 Multi-instance end-to-end tests run from the clusterio-v2 integration repo, which isn't public. The design documents that code comments cite by section (§) live there too.
