@@ -2,15 +2,17 @@ import * as lib from "@clusterio/lib";
 import { Type, type Static, type TSchema } from "@sinclair/typebox";
 
 /**
- * One 10-s sample (§4.1): when it ended, the UPS over it, the Factorio process's CPU ms per tick (null: unread), and
- * its memory figure in bytes (memory amendment §3.1; null: unread). `mem` is optional, so a sample from before it
- * still validates (MR4).
+ * One 10-s sample (§4.1): when it ended, the UPS over it, the Factorio process's CPU ms per tick over all threads
+ * (null: unread), its memory figure in bytes (memory amendment §3.1; null: unread), and its main thread's CPU ms per
+ * tick (capacity amendment C9; null: unread). `mem` and `mainMs` are optional, so a sample from before them still
+ * validates (MR4).
  */
 export const SampleSchema = Type.Object({
 	at: Type.Number(),
 	ups: Type.Number(),
 	ms: Type.Union([Type.Number(), Type.Null()]),
 	mem: Type.Optional(Type.Union([Type.Number(), Type.Null()])),
+	mainMs: Type.Optional(Type.Union([Type.Number(), Type.Null()])),
 });
 export type Sample = Static<typeof SampleSchema>;
 
@@ -26,8 +28,13 @@ export const MoveSchema = Type.Object({
 	to: nullable(Type.Integer()),
 	reason: Type.Union([
 		Type.Literal("manual"), Type.Literal("failover"), Type.Literal("drain"), Type.Literal("overload"),
-		Type.Literal("after_check"), Type.Literal("memory"),
+		Type.Literal("after_check"), Type.Literal("memory"), Type.Literal("room"),
 	]),
+	/**
+	 * Capacity amendment C5: an overload move of its host's only lagging tile: it is pre-flighted on its own host and
+	 * on every candidate, and goes to the measured winner or nowhere. Optional: a move from before C5 has none.
+	 */
+	measure: Type.Optional(Type.Boolean()),
 	/** The operator named the target: no other host is tried (plan ruling 11). */
 	pinned: Type.Boolean(),
 	step: Type.Union([
@@ -52,14 +59,15 @@ export const MoveSchema = Type.Object({
 	error: nullable(Type.String()),
 	/**
 	 * The last pre-flight's verdict (the ledger, §4.3 unit 4): T's ms per tick there, the target's lowest UPS, and its
-	 * busy tiles then, which a failed after-check makes the target's slots (§5.6).
+	 * running tiles then, which a failed after-check makes the target's cap (capacity amendment C3). `tiles` is
+	 * optional: a move from before the amendment has none (and a `busy` nothing reads).
 	 */
 	preflight: nullable(Type.Object({
-		msPerTick: nullable(Type.Number()), minUps: nullable(Type.Number()), busy: Type.Integer(),
+		msPerTick: nullable(Type.Number()), minUps: nullable(Type.Number()), tiles: Type.Optional(Type.Integer()),
 	})),
 	/**
-	 * The after-check (§5.6, R9): T's mean UPS and ms per tick on the target, the lowest UPS of the target's other
-	 * tiles, and the verdict; ok is null when it couldn't be judged.
+	 * The after-check (§5.6, R9): T's mean UPS and ms per tick on the target, the lowest mean UPS among the target's
+	 * other tiles (capacity amendment C6), and the verdict; ok is null when it couldn't be judged.
 	 */
 	check: nullable(Type.Object({
 		at: Type.Number(), ups: nullable(Type.Number()), ms: nullable(Type.Number()),
@@ -70,6 +78,31 @@ export type Move = Static<typeof MoveSchema>;
 export type Step = Move["step"];
 export type Check = NonNullable<Move["check"]>;
 
+/**
+ * Capacity amendment C8: why a tile isn't offered to a host again, and since when (ms). `overload`: it left that host
+ * as its only lagging tile or as its heaviest empty one; `slow`: its own mean UPS was under the floor in its
+ * after-check there. No expiry: the owner clears it.
+ */
+export const MarkSchema = Type.Object({
+	reason: Type.Union([Type.Literal("overload"), Type.Literal("slow")]),
+	at: Type.Number(),
+});
+export type Mark = Static<typeof MarkSchema>;
+/** A mark's reason as the page and `clusterioctl balancer status` word it. */
+export const MARK_TEXT: Record<Mark["reason"], string> = {
+	overload: "left it under overload",
+	slow: "ran under the UPS floor there",
+};
+
+/**
+ * Capacity amendment C7: room is being made on `host` for tile `instanceId`, its measured winner, until `until` (ms).
+ * One at most.
+ */
+export const ReserveSchema = Type.Object({ instanceId: Type.Integer(), host: Type.Integer(), until: Type.Number() });
+export type Reserve = Static<typeof ReserveSchema>;
+/** C7 step 2: how long a reservation stands. */
+export const RESERVE_MS = 30 * 60_000;
+
 /** What `clusterioctl balancer status` and the page show (§11's minimal page). */
 export const StatusSchema = Type.Object({
 	hosts: Type.Array(Type.Object({
@@ -78,15 +111,11 @@ export const StatusSchema = Type.Object({
 		connected: Type.Boolean(),
 		/** When the balancer saw it go; null while it is connected. */
 		goneSinceMs: nullable(Type.Number()),
-		/** The join benchmark's ms per tick with one copy (§5.7); null: unbenchmarked. */
-		speed: nullable(Type.Number()),
-		/** The busy tiles it takes: learned (§5.6) or the benchmark's; null: no limit. */
-		slots: nullable(Type.Integer()),
-		learned: Type.Boolean(),
-		/** Its running tiles at balancer.busy_tile_ms or more. */
-		busy: Type.Integer(),
+		/** Capacity amendment C2: its core count; null until it reports one. */
+		cores: nullable(Type.Integer()),
+		/** C3: the running tiles it carries at most, and until when (ms); null: uncapped. */
+		cap: nullable(Type.Object({ tiles: Type.Integer(), until: Type.Number() })),
 		draining: Type.Boolean(),
-		benchmarking: Type.Boolean(),
 		/**
 		 * Memory amendment §3.2: the percent of its memory in use (null: no reading 60 s old or newer), its
 		 * balancer.memory_limit_pct, and its room for a new tile in bytes (negative over the limit).
@@ -100,9 +129,10 @@ export const StatusSchema = Type.Object({
 		name: Type.String(),
 		host: nullable(Type.Integer()),
 		status: Type.String(),
-		/** The last sample's UPS, and the last minute's mean CPU ms per tick. */
+		/** The last sample's UPS, and the last minute's mean CPU ms per tick: all threads, and the main thread (C9). */
 		ups: nullable(Type.Number()),
 		ms: nullable(Type.Number()),
+		mainMs: nullable(Type.Number()),
 		players: Type.Integer(),
 		/** The copy's save time on its host (its pull time until the new host saves); null without a copy. */
 		copyMtimeMs: nullable(Type.Number()),
@@ -110,6 +140,10 @@ export const StatusSchema = Type.Object({
 		need: Type.Number(),
 	})),
 	moves: Type.Array(MoveSchema),
+	/** Capacity amendment C8: the marked pairs. */
+	marks: Type.Array(Type.Object({ instanceId: Type.Integer(), hostId: Type.Integer(), mark: MarkSchema })),
+	/** Capacity amendment C7: the outstanding reservation; null: none. */
+	reserve: nullable(ReserveSchema),
 });
 export type Status = Static<typeof StatusSchema>;
 
@@ -216,27 +250,12 @@ export class HostLeavingEvent {
 	}
 }
 
-/** Host → controller at each connect (R8): its newest Factorio; the join benchmark re-runs when it changes (§5.7). */
-export class FactorioVersionEvent {
-	declare ["constructor"]: typeof FactorioVersionEvent;
-	static type = "event" as const;
-	static src = "host" as const;
-	static dst = "controller" as const;
-	static plugin = "balancer" as const;
-
-	constructor(public version: string) { }
-
-	static jsonSchema = Type.Object({ version: Type.String() });
-
-	static fromJSON(json: Static<typeof FactorioVersionEvent.jsonSchema>) {
-		return new this(json.version);
-	}
-}
-
 /**
  * Host → controller every 10 s, at each connect and when balancer.memory_limit_pct changes (memory amendment §3.2,
- * MR-C1): this host's limit, and the machine's memory in bytes as Clusterio's SystemInfo reads it (os.totalmem(),
- * os.freemem()). The controller keeps both in memory only, the reading stamped with its own clock.
+ * MR-C1): this host's limit, the machine's memory in bytes as Clusterio's SystemInfo reads it (os.totalmem(),
+ * os.freemem()), and its core count (capacity amendment C2: os.availableParallelism(); absent from a host on the
+ * build before it: no core count yet). The controller keeps them in memory only, the reading stamped with its own
+ * clock.
  */
 export class HostMemoryEvent {
 	declare ["constructor"]: typeof HostMemoryEvent;
@@ -245,52 +264,18 @@ export class HostMemoryEvent {
 	static dst = "controller" as const;
 	static plugin = "balancer" as const;
 
-	constructor(public limitPct: number, public capacity: number, public available: number) { }
-
-	static jsonSchema = Type.Object({ limitPct: Type.Number(), capacity: Type.Number(), available: Type.Number() });
-
-	static fromJSON(json: Static<typeof HostMemoryEvent.jsonSchema>) {
-		return new this(json.limitPct, json.capacity, json.available);
-	}
-}
-
-/**
- * Controller → host (§5.7): download the stream's reference save and run the join benchmark on it with `modPack` (null:
- * no mods, P5) on Factorio `factorioVersion`, at most `maxCopies` copies at once (memory amendment §3.4, M7). Answers
- * the speed, the slots, the cores and each count's ms per tick.
- */
-export class HostBenchmarkRequest {
-	declare ["constructor"]: typeof HostBenchmarkRequest;
-	static type = "request" as const;
-	static src = "controller" as const;
-	static dst = "host" as const;
-	static plugin = "balancer" as const;
-
 	constructor(
-		public streamId: string,
-		public modPack: lib.ModPack | null,
-		public factorioVersion: string,
-		public maxCopies: number,
+		public limitPct: number, public capacity: number, public available: number, public cores?: number,
 	) { }
 
 	static jsonSchema = Type.Object({
-		streamId: Type.String(),
-		modPack: nullable(lib.ModPack.jsonSchema),
-		factorioVersion: Type.String(),
-		maxCopies: Type.Integer(),
+		limitPct: Type.Number(), capacity: Type.Number(), available: Type.Number(),
+		cores: Type.Optional(Type.Integer()),
 	});
 
-	static fromJSON(json: Static<typeof HostBenchmarkRequest.jsonSchema>) {
-		const modPack = json.modPack === null ? null : lib.ModPack.fromJSON(json.modPack);
-		return new this(json.streamId, modPack, json.factorioVersion, json.maxCopies);
+	static fromJSON(json: Static<typeof HostMemoryEvent.jsonSchema>) {
+		return new this(json.limitPct, json.capacity, json.available, json.cores);
 	}
-
-	static Response = lib.plainJson(Type.Object({
-		speed: Type.Number(),
-		slots: Type.Integer(),
-		cores: Type.Integer(),
-		runs: Type.Array(Type.Object({ copies: Type.Integer(), msPerTick: Type.Number() })),
-	}));
 }
 
 /** Control → controller (§5.4): start or stop draining a host. Drain runs whatever balancer.enabled says (P4). */
@@ -311,20 +296,25 @@ export class DrainRequest {
 	}
 }
 
-/** Control → controller (§5.7): "benchmark now" on a host. */
-export class BenchmarkRequest {
-	declare ["constructor"]: typeof BenchmarkRequest;
+/**
+ * Control → controller (capacity amendment C8): clear the mark of `instanceId` on `hostId`, or, with no instance, all
+ * of that host's (its hardware changed). Answers how many it cleared.
+ */
+export class ClearMarksRequest {
+	declare ["constructor"]: typeof ClearMarksRequest;
 	static type = "request" as const;
 	static src = "control" as const;
 	static dst = "controller" as const;
 	static plugin = "balancer" as const;
 	static permission = "balancer.move" as const;
 
-	constructor(public hostId: number) { }
+	constructor(public hostId: number, public instanceId?: number) { }
 
-	static jsonSchema = Type.Object({ hostId: Type.Integer() });
+	static jsonSchema = Type.Object({ hostId: Type.Integer(), instanceId: Type.Optional(Type.Integer()) });
 
-	static fromJSON(json: Static<typeof BenchmarkRequest.jsonSchema>) {
-		return new this(json.hostId);
+	static fromJSON(json: Static<typeof ClearMarksRequest.jsonSchema>) {
+		return new this(json.hostId, json.instanceId);
 	}
+
+	static Response = lib.plainJson(Type.Object({ cleared: Type.Integer() }));
 }

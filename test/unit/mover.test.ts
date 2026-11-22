@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { Move } from "../../contracts.js";
 import { Mover, type MoverConfig, type MoverPort } from "../../mover.js";
+import { offered } from "../../targets.js";
 
 const HOUR = 3_600_000;
 
@@ -25,7 +26,10 @@ function deferred() {
  * A fake cluster: hosts 1–3 connected; instances 7 and 8 running on host 1, with no players; every game at tick 100.
  * Each call is recorded as text in `calls`, and in `trail` with "saved <step>" for each persist. A call whose text is
  * in `failing` throws, and a pre-flight in `failing` fails. `gates` holds a host's pre-flights until the test opens
- * them. `roomless` hosts have no memory room; `runs` records each candidates call's `runs` flag.
+ * them. `roomless` hosts have no memory room, and are candidates only for a C5 test (`measure`); `runs` records each
+ * candidates call's `runs` flag. `order` is the candidates' C2 order, `ms` a host's pre-flight result (3 unless set),
+ * and `reserved` each reservation written, which `state.reservable` false refuses. `marked` hosts are offered as the
+ * controller offers them (capacity amendment C8's `offered`).
  */
 function fake(config: Partial<MoverConfig> = {}, resumed = true) {
 	const calls: string[] = [];
@@ -36,10 +40,18 @@ function fake(config: Partial<MoverConfig> = {}, resumed = true) {
 	const keepRunning = new Set<number>();
 	const gates = new Map<number, Promise<void>>();
 	const roomless = new Set<number>();
+	const untestable = new Set<number>();
 	const runs: boolean[] = [];
+	const order = [2, 3];
+	const ms = new Map<number, number>();
+	const reserved: string[] = [];
+	const marked = new Set<number>();
 	const hosts = new Map([[1, true], [2, true], [3, true]]);
 	const status = new Map<number, string>([[7, "running"], [8, "running"]]);
-	const state = { now: 1_000_000, players: 0, copy: true };
+	const state = {
+		now: 1_000_000, players: 0, copy: true, reservable: true, mtime: 0, writes: true,
+		save: "world.zip" as string | undefined,
+	};
 	const moves: Move[] = [];
 	const bad: Record<string, number> = {};
 	const call = (text: string) => {
@@ -52,21 +64,32 @@ function fake(config: Partial<MoverConfig> = {}, resumed = true) {
 	const port: MoverPort = {
 		now: () => state.now,
 		wait: async () => undefined,
-		candidates: (_id, from, _reason, run) => {
+		candidates: (_id, from, reason, run, measure, tried = []) => {
 			runs.push(run);
-			return [2, 3].filter(h => h !== from && hosts.get(h));
+			return offered(
+				order.filter(h => h !== from && hosts.get(h) && (measure || !roomless.has(h))),
+				h => marked.has(h), h => tried.includes(h), reason === "failover" || reason === "drain",
+			);
+		},
+		reserve: (id, h) => {
+			if (state.reservable) {
+				reserved.push(`${id} ${h}`);
+			}
+			return state.reservable;
 		},
 		noRoom: (_id, h) => (roomless.has(h) ? `host ${h} has room for 0 MB, it needs 1229 MB` : undefined),
+		testable: (_id, h) => !untestable.has(h),
 		hostConnected: h => hosts.get(h) ?? false,
 		status: id => status.get(id) ?? "stopped",
 		players: () => state.players,
-		loadedSave: () => "world.zip",
+		loadedSave: () => state.save,
+		saveMtime: () => state.mtime,
 		hasCopy: () => state.copy,
 		preflight: async (id, h) => {
 			calls.push(`preflight ${id} ${h}`);
 			trail.push(`preflight ${id} ${h}`);
 			await gates.get(h);
-			return { pass: !failing.has(`preflight ${id} ${h}`), msPerTick: 3, minUps: 60, busy: h };
+			return { pass: !failing.has(`preflight ${id} ${h}`), msPerTick: ms.get(h) ?? 3, minUps: 60, tiles: h };
 		},
 		tick: async id => {
 			call(`tick ${id}`);
@@ -77,6 +100,9 @@ function fake(config: Partial<MoverConfig> = {}, resumed = true) {
 				status.set(id, "stopped");
 			}
 			call(`stop ${id}`);
+			if (state.writes) {
+				state.mtime += 1;
+			}
 		},
 		kill: async id => {
 			call(`kill ${id}`);
@@ -93,7 +119,7 @@ function fake(config: Partial<MoverConfig> = {}, resumed = true) {
 			return "balancer.zip";
 		},
 		start: async (id, save) => {
-			call(`start ${id} ${save}`);
+			call(save === undefined ? `start ${id}` : `start ${id} ${save}`);
 			status.set(id, "running");
 		},
 		save: async () => {
@@ -114,7 +140,7 @@ function fake(config: Partial<MoverConfig> = {}, resumed = true) {
 	}
 	return {
 		port, keepRunning, mover, calls, trail, phases, finished, failing, gates, hosts, status, state, moves, bad,
-		roomless, runs,
+		roomless, untestable, runs, order, ms, reserved, marked,
 	};
 }
 
@@ -235,6 +261,25 @@ test("a failover move skips the stop and the pull, and starts only a tile that w
 	f.mover.add({ instanceId: 8, from: 1, reason: "failover", wasRunning: false });
 	await settle();
 	assert.deepEqual(f.calls, ["preflight 8 2", "assign 8 2", "push 8"]);
+});
+
+test("a failover move whose host is back ends failed before the pre-flight, and again before the assign", async () => {
+	const f = fake();
+	const a = f.mover.add({ instanceId: 7, from: 1, reason: "failover", wasRunning: true });
+	await settle();
+	assert.deepEqual(f.calls, []);
+	assert.equal(a.step, "failed");
+	assert.equal(a.error, "its host is back");
+	f.hosts.set(1, false);
+	const gate = deferred();
+	f.gates.set(2, gate.promise);
+	const b = f.mover.add({ instanceId: 8, from: 1, reason: "failover", wasRunning: true });
+	await settle();
+	f.hosts.set(1, true); // back while the pre-flight runs
+	gate.resolve();
+	await settle();
+	assert.deepEqual(f.calls, ["preflight 8 2"]);
+	assert.equal(b.step, "failed");
 });
 
 test("a controller restart resumes from the persisted step (§5.2, Review Focus 2)", async () => {
@@ -456,19 +501,19 @@ test("a pre-flight that throws leaves the pair usable; only a verdict marks it b
 		if (h === 2) {
 			throw new Error("stream timeout");
 		}
-		return { pass: false, msPerTick: 9, minUps: 40, busy: 0 };
+		return { pass: false, msPerTick: 9, minUps: 40, tiles: 0 };
 	};
 	f.mover.add({ instanceId: 7, ...manual });
 	await settle();
 	assert.deepEqual(Object.keys(f.bad), ["7:3"], "host 3 failed its pre-flight; host 2 only errored");
 });
 
-test("each pre-flight's verdict goes on the move, with the target's busy tiles (the ledger; §5.6)", async () => {
+test("each pre-flight's verdict goes on the move, with the target's running tiles (the ledger; C3)", async () => {
 	const f = fake();
 	f.failing.add("preflight 7 2");
 	const m = f.mover.add({ instanceId: 7, ...manual });
 	await settle();
-	assert.deepEqual(m.preflight, { msPerTick: 3, minUps: 60, busy: 3 }, "the last one: host 3's pass");
+	assert.deepEqual(m.preflight, { msPerTick: 3, minUps: 60, tiles: 3 }, "the last one: host 3's pass");
 });
 
 test("the ledger keeps every unfinished move and the last 500 ended ones (§4.3 unit 4, R13)", async () => {
@@ -493,6 +538,17 @@ test("a draining host's stopped tile goes by steps 3–5: no pre-flight, no copy
 	assert.deepEqual(f.runs, [false], "memory §3.4: a stopped tile's drain runs nothing there (Review Focus 2)");
 });
 
+test("a draining host's stopped tile with no save is assigned and done: nothing to pull or push", async () => {
+	const f = fake();
+	f.state.copy = false;
+	f.state.save = undefined; // placed and assigned, never started: the host lists no save
+	f.status.set(7, "stopped");
+	const m = f.mover.add({ instanceId: 7, from: 1, reason: "drain", wasRunning: false });
+	await settle();
+	assert.deepEqual(f.calls, ["assign 7 2"]);
+	assert.deepEqual([m.step, m.to, m.error], ["done", 2, null]);
+});
+
 test("memory §3.4 (M5): a pinned move whose host lost room goes on to the pre-flight with a warning", async () => {
 	const f = fake();
 	f.roomless.add(2);
@@ -501,4 +557,204 @@ test("memory §3.4 (M5): a pinned move whose host lost room goes on to the pre-f
 	assert.deepEqual([m.step, m.error], ["done", null]);
 	assert.ok(f.calls.includes("assign 7 2"), "the move proceeded to host 2");
 	assert.ok(f.phases.includes("memory_override"), "and logged the override");
+});
+
+/** Capacity amendment C5: tile 7, host 1's only lagging tile, measured: `own` ms on host 1, then hosts 2 and 3. */
+function measured(own: number, two: number, three: number) {
+	const f = fake();
+	f.ms.set(1, own).set(2, two).set(3, three);
+	f.failing.add("preflight 7 1"); // its own host fails the UPS half by construction
+	const go = () => f.mover.add({ instanceId: 7, from: 1, reason: "overload", wasRunning: true, measure: true });
+	return { ...f, go };
+}
+const tests = (f: { calls: string[] }) => f.calls.filter(c => c.startsWith("preflight"));
+
+test("capacity C5: the lone laggard is pre-flighted on its own host and each candidate; the lowest wins", async () => {
+	const f = measured(10, 6, 4);
+	const m = f.go();
+	await settle();
+	assert.deepEqual(f.calls.slice(0, 5), ["preflight 7 1", "preflight 7 2", "preflight 7 3", "tick 7", "stop 7"]);
+	assert.deepEqual([m.step, m.to, m.tried], ["done", 3, [1, 2, 3]]);
+	assert.deepEqual(m.preflight, { msPerTick: 4, minUps: 60, tiles: 3 }, "the winner's result is the ledger's (C3)");
+	assert.deepEqual(f.bad, {}, "no pair is marked: not its own host's, nor the candidate that lost");
+});
+
+test("capacity C5: no own-host run without memory for the copy; the move ends and marks nothing", async () => {
+	const f = measured(10, 6, 4);
+	f.untestable.add(1);
+	const m = f.go();
+	await settle();
+	assert.deepEqual(tests(f), [], "nothing is run on any host");
+	assert.deepEqual([m.step, m.error], ["failed", "no memory to test it on its own host"]);
+	assert.deepEqual(f.bad, {});
+});
+
+test("capacity C5: results within 15 % of the lowest tie, and a tie goes to C2's order", async () => {
+	const tie = measured(10, 4.5, 4);
+	const m = tie.go();
+	await settle();
+	assert.equal(m.to, 2, "4.5 is within 15 % of 4: host 2 ranks first");
+	const clear = measured(10, 4.7, 4);
+	const n = clear.go();
+	await settle();
+	assert.equal(n.to, 3, "4.7 is not");
+});
+
+test("capacity C5: the winner must be 30 % under its own host's result, or its own host wins", async () => {
+	const f = measured(10, 7.1, 9);
+	const m = f.go();
+	await settle();
+	assert.deepEqual(tests(f), ["preflight 7 1", "preflight 7 2", "preflight 7 3"]);
+	assert.deepEqual(f.calls.length, 3, "nothing moves");
+	assert.deepEqual([m.step, m.to, m.error], ["failed", null, "its own host measured best (C5)"]);
+	assert.deepEqual(Object.keys(f.bad).sort(), ["7:2", "7:3"], "every candidate tested is a bad pair, its own not");
+	assert.equal(f.bad["7:2"], 1_000_000 + 24 * HOUR);
+	const under = measured(10, 6.9, 9);
+	const n = under.go();
+	await settle();
+	assert.deepEqual([n.step, n.to], ["done", 2]);
+});
+
+test("capacity C5: a candidate whose pre-flight threw isn't a bad pair when its own host wins (C46)", async () => {
+	const f = measured(10, 7.1, 9);
+	const threw = Promise.reject(new Error("stream timeout"));
+	threw.catch(() => undefined);
+	f.gates.set(2, threw);
+	const m = f.go();
+	await settle();
+	assert.deepEqual([m.step, m.error], ["failed", "its own host measured best (C5)"]);
+	assert.deepEqual(Object.keys(f.bad), ["7:3"], "host 3 measured and lost; host 2 gave no verdict");
+});
+
+test("capacity C5: no host under the line: nothing moves, and each candidate is a bad pair", async () => {
+	const f = measured(30, 25, 24);
+	f.failing.add("preflight 7 2").add("preflight 7 3"); // over C4's line, or its tiles dipped
+	const m = f.go();
+	await settle();
+	assert.deepEqual([m.step, m.error, f.calls.length], ["failed", "no host measured under the line (C5)", 3]);
+	assert.deepEqual(Object.keys(f.bad).sort(), ["7:2", "7:3"]);
+});
+
+test("capacity C5: a candidate that fails its pre-flight is a bad pair and out; the other can still win", async () => {
+	const f = measured(10, 2, 6);
+	f.failing.add("preflight 7 2");
+	const m = f.go();
+	await settle();
+	assert.deepEqual([m.step, m.to, Object.keys(f.bad)], ["done", 3, ["7:2"]]);
+});
+
+test("capacity C5: no candidate, no test", async () => {
+	const f = measured(10, 4, 4);
+	f.order.length = 0;
+	const m = f.go();
+	await settle();
+	assert.deepEqual([m.step, m.error, f.calls], ["failed", "no eligible target", []]);
+});
+
+test("capacity C5: results aren't kept across a controller restart; the test runs again", async () => {
+	const f = measured(10, 6, 4);
+	const gate = deferred();
+	f.gates.set(3, gate.promise);
+	const m = f.go();
+	await settle();
+	assert.deepEqual([m.step, m.tried], ["preflight", [1, 2, 3]]);
+	const mover = new Mover(f.moves, f.bad, f.port, () => ({ maxConcurrent: 3, badPairHours: 24, graceMs: 0 }));
+	f.calls.length = 0;
+	f.gates.delete(3);
+	mover.resume();
+	await settle();
+	assert.deepEqual(tests(f), ["preflight 7 1", "preflight 7 2", "preflight 7 3"]);
+	assert.deepEqual([m.step, m.to], ["done", 3]);
+	gate.resolve();
+});
+
+test("capacity C7 step 2: a winner short of memory: the move ends 'needs room', reserved, no bad pair", async () => {
+	const f = measured(10, 9, 4);
+	f.roomless.add(3);
+	const m = f.go();
+	await settle();
+	assert.deepEqual(f.calls, ["preflight 7 1", "preflight 7 2", "preflight 7 3"], "nothing stops");
+	assert.deepEqual([m.step, m.to, m.error], ["failed", null, "needs room on host 3"]);
+	assert.deepEqual([f.reserved, f.bad], [["7 3"], {}]);
+});
+
+test("capacity C7 step 1: a short winner that can't be reserved is dropped, and the next result is taken", async () => {
+	const f = measured(10, 6, 4);
+	f.roomless.add(3);
+	f.state.reservable = false;
+	const m = f.go();
+	await settle();
+	assert.deepEqual([m.step, m.to, f.reserved], ["done", 2, []]);
+	const none = measured(10, 9, 4);
+	none.roomless.add(3);
+	none.state.reservable = false;
+	const n = none.go();
+	await settle();
+	assert.deepEqual([n.step, n.error], ["failed", "no room can be made on host 3 (C7)"], "host 2 isn't 30 % under");
+	assert.deepEqual(Object.keys(none.bad).sort(), ["7:2", "7:3"]);
+});
+
+test("capacity C7 step 4: the pinned move to the winner pre-flights it again, alone", async () => {
+	const f = fake();
+	const m = f.mover.add({ instanceId: 7, from: 1, to: 3, reason: "overload", wasRunning: true });
+	await settle();
+	assert.deepEqual([tests(f), m.step, m.to, m.pinned], [["preflight 7 3"], "done", 3, true]);
+});
+
+test("capacity C7 step 4: the pinned move to the winner ends as failed when W has no room; only the owner's goes on",
+	async () => {
+		const f = fake();
+		f.roomless.add(3); // the evicted tile's move failed and it is back on W
+		const m = f.mover.add({ instanceId: 7, from: 1, to: 3, reason: "overload", wasRunning: true });
+		await settle();
+		assert.deepEqual(f.calls, [], "no pre-flight, nothing stops");
+		assert.deepEqual([m.step, m.error], ["failed", "host 3 has room for 0 MB, it needs 1229 MB"]);
+		assert.ok(!f.phases.includes("memory_override"));
+	});
+
+test("capacity C8: a failover whose unmarked host's pre-flight errors goes on to the marked host", async () => {
+	const f = fake();
+	f.hosts.set(1, false); // a failover is from a gone host
+	f.marked.add(3);
+	const error = Promise.reject(new Error("the stream broke"));
+	error.catch(() => undefined);
+	f.gates.set(2, error); // an error is no verdict, so no bad pair (C46)
+	const m = f.mover.add({ instanceId: 7, from: 1, reason: "failover", wasRunning: true });
+	await settle();
+	assert.deepEqual(tests(f), ["preflight 7 2", "preflight 7 3"]);
+	assert.deepEqual([m.step, m.to, f.bad], ["done", 3, {}]);
+});
+
+test("capacity C5: a winner busy with another move when the tests end waits for it; the results are kept", async () => {
+	const f = measured(10, 6, 4);
+	f.order.reverse(); // host 3 is tested first, then host 2
+	const two = deferred();
+	f.gates.set(2, two.promise);
+	const m = f.go();
+	await settle();
+	assert.deepEqual([m.to, m.tried], [2, [1, 3, 2]]);
+	const three = deferred();
+	f.gates.set(3, three.promise);
+	const other = f.mover.add({ instanceId: 9, from: null, to: 3, reason: "manual", wasRunning: false });
+	await settle();
+	assert.equal(other.step, "preflight", "host 3 is free between the tests, so another move took it");
+	two.resolve();
+	await settle();
+	assert.deepEqual([m.step, m.to], ["queued", null], "the winner, host 3, is in another move");
+	assert.ok(!f.calls.includes("stop 7"));
+	three.resolve();
+	await settle();
+	assert.deepEqual([other.step, m.step, m.to], ["done", "done", 3]);
+	const mine = tests(f).filter(c => c.startsWith("preflight 7"));
+	assert.deepEqual(mine, ["preflight 7 1", "preflight 7 3", "preflight 7 2"], "not tested again");
+});
+
+test("a stop that wrote no save ends the move before the pull and starts T on its newest save", async () => {
+	const f = fake();
+	f.state.writes = false; // Clusterio killed a hung Factorio: the stop resolved, the file is stale
+	const m = f.mover.add({ instanceId: 7, ...manual });
+	await settle();
+	assert.deepEqual(f.calls, ["preflight 7 2", "tick 7", "stop 7", "start 7"]);
+	assert.deepEqual([m.step, m.error], ["failed", "the stop wrote no world.zip"]);
+	assert.equal(f.status.get(7), "running");
 });

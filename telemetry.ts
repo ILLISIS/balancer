@@ -9,13 +9,16 @@ export const KEEP_MS = 300_000;
 /** ponytail: x86-64 Linux's USER_HZ; read `getconf CLK_TCK` if a host ever differs. */
 const CLK_TCK = 100;
 
-/** Two readings make a sample; `mem` is the process's memory figure (memory amendment §3.1), null: unread. */
-export type Reading = { tick: number; cpuMs: number | null; at: number; mem?: number | null };
+/**
+ * Two readings make a sample; `mem` is the process's memory figure (memory amendment §3.1), `mainMs` its main thread's
+ * CPU time (capacity amendment C9); null: unread.
+ */
+export type Reading = { tick: number; cpuMs: number | null; at: number; mem?: number | null; mainMs?: number | null };
 
 /**
  * A sample from two readings; undefined when the tick or the clock didn't advance (a restarted or paused game).
  * `stallMs`, the time blocking autosaves stalled the tick loop in between, is left out of the elapsed time (P1). Its
- * memory figure is the newer reading's.
+ * memory figure is the newer reading's. `ms` is the CPU time of all threads per tick, `mainMs` the main thread's.
  */
 export function sample(prev: Reading, next: Reading, stallMs = 0): Sample | undefined {
 	const ticks = next.tick - prev.tick;
@@ -23,17 +26,22 @@ export function sample(prev: Reading, next: Reading, stallMs = 0): Sample | unde
 	if (ticks <= 0 || elapsed <= 0) {
 		return undefined;
 	}
-	const ms = prev.cpuMs === null || next.cpuMs === null ? null : (next.cpuMs - prev.cpuMs) / ticks;
-	return { at: next.at, ups: ticks * 1000 / elapsed, ms, mem: next.mem ?? null };
+	const per = (a?: number | null, b?: number | null) => (a === null || a === undefined || b === null
+		|| b === undefined ? null : (b - a) / ticks);
+	return {
+		at: next.at, ups: ticks * 1000 / elapsed, ms: per(prev.cpuMs, next.cpuMs), mem: next.mem ?? null,
+		mainMs: per(prev.mainMs, next.mainMs),
+	};
 }
 
 /**
  * A process's CPU time (user + system) in ms, from /proc/<pid>/stat; null where there is no /proc or no such process
- * (plan ruling 3). The whole process: Factorio's worker threads count too.
+ * (plan ruling 3). The whole process: Factorio's worker threads count too. `main` (capacity amendment C9): the main
+ * thread alone, from /proc/<pid>/task/<pid>/stat.
  */
-export async function cpuMs(pid: number): Promise<number | null> {
+export async function cpuMs(pid: number, main = false): Promise<number | null> {
 	try {
-		const stat = await fs.readFile(`/proc/${pid}/stat`, "utf8");
+		const stat = await fs.readFile(main ? `/proc/${pid}/task/${pid}/stat` : `/proc/${pid}/stat`, "utf8");
 		// After "(comm) " the fields count from 3 (state): utime is field 14, stime field 15.
 		const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
 		return (Number(fields[11]) + Number(fields[12])) * 1000 / CLK_TCK;
@@ -92,6 +100,8 @@ export class SaveStalls {
 /** The controller's recent samples, per instance. */
 export class Telemetry {
 	private samples = new Map<number, Sample[]>();
+	/** Capacity amendment C2: a moved tile's last all-thread mean, until its first sample on the new host. */
+	private carried = new Map<number, number>();
 
 	constructor(private now: () => number = Date.now) { }
 
@@ -106,6 +116,9 @@ export class Telemetry {
 	}
 
 	add(instanceId: number, samples: Sample[]): void {
+		if (samples.length > 0) {
+			this.carried.delete(instanceId);
+		}
 		this.samples.set(instanceId, [...this.recent(instanceId), ...samples]);
 	}
 
@@ -120,12 +133,18 @@ export class Telemetry {
 		return ups.length > 0 ? Math.min(...ups) : undefined;
 	}
 
-	/** The mean CPU ms per tick of the samples that have one, within 60 s of the newest sample held (ruling C15). */
-	meanMs(instanceId: number): number | undefined {
+	/**
+	 * The mean CPU ms per tick of the samples that have one, within 60 s of the newest sample held (ruling C15): over
+	 * all threads (`ms`; with no sample since forget(), the figure it kept), or of the main thread (`mainMs`, C9).
+	 */
+	meanMs(instanceId: number, of: "ms" | "mainMs" = "ms"): number | undefined {
 		const recent = this.recent(instanceId);
 		const since = (recent.at(-1)?.at ?? 0) - 60_000;
-		const ms = recent.flatMap(s => (s.at > since && s.ms !== null ? [s.ms] : []));
-		return ms.length > 0 ? ms.reduce((a, b) => a + b, 0) / ms.length : undefined;
+		const ms = recent.flatMap(s => (s.at > since ? s[of] ?? [] : []));
+		if (ms.length > 0) {
+			return ms.reduce((a, b) => a + b, 0) / ms.length;
+		}
+		return of === "ms" ? this.carried.get(instanceId) : undefined;
 	}
 
 	/** The mean UPS and CPU ms per tick of the samples that ended in (from, to]; undefined when none did (§5.6). */
@@ -148,11 +167,15 @@ export class Telemetry {
 		const recent = this.recent(instanceId);
 		const since = (recent.at(-1)?.at ?? 0) - lagMs;
 		const window = recent.filter(s => s.at > since);
-		return window.length >= lagMs / SAMPLE_MS - 1 && window.every(s => s.ups < floor);
+		return window.length > 0 && window.length >= lagMs / SAMPLE_MS - 1 && window.every(s => s.ups < floor);
 	}
 
-	/** Drop an instance's samples (a move ended). */
+	/** Drop an instance's samples (a move ended); its load figure stands until its next sample (C2). */
 	forget(id: number): void {
+		const ms = this.meanMs(id);
+		if (ms !== undefined) {
+			this.carried.set(id, ms);
+		}
 		this.samples.delete(id);
 	}
 

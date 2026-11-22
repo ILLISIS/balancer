@@ -1,23 +1,20 @@
 import * as path from "node:path";
 import { loadDataFile, saveDataFile, type Migration } from "universal_edges/runtime";
-import type { Move } from "./contracts.js";
+import type { Mark, Move, Reserve } from "./contracts.js";
 
 /** A stored copy (§4.3 unit 1): the save it came from, its time on its host, and when it was pulled. */
 export type Copy = { name: string; mtimeMs: number; size: number; pulledAt: number };
 /**
- * A host's join benchmark (§5.7): one copy's ms per tick, the slots, the Factorio version the host reported (R8), the
- * reference it ran (R7), and when.
+ * Per host (capacity amendment C3): its cap, the running tiles it carries at most until `until` (ms), or none. A file
+ * from before the amendment may hold `bench` and `learned` here, and `reference` beside `hosts`: nothing reads them.
  */
-export type Bench = { speed: number; slots: number; version: string; ref: string; at: number };
-/** Per host: its benchmark and its learned slots (§5.6), either absent. */
-export type HostState = { bench?: Bench; learned?: number };
-/** The default reference save (P5, R7): a busy tile's copy, frozen with its mod pack and Factorio version. */
-export type Reference = { instanceId: number; modPackId: number | null; version: string };
+export type HostState = { cap?: { tiles: number; until: number } };
 
 /**
  * balancer.json (§4.3): the copies, the moves (every unfinished one and the last 500 ended: the ledger), the bad pairs
- * ("<instance>:<host>" → until, ms), the instances that were running when their host went (§5.3), phase 2's hosts,
- * draining hosts and default reference (R2), and each tile's memory figure (memory amendment §3.1).
+ * ("<instance>:<host>" → until, ms), the instances that were running when their host went (§5.3), phase 2's hosts
+ * and draining hosts (R2), each tile's memory figure (memory amendment §3.1), and the for-cause marks (capacity
+ * amendment C8), and the reservation (C7).
  */
 export type State = {
 	copies: Record<string, Copy>;
@@ -26,9 +23,12 @@ export type State = {
 	wasRunning: number[];
 	hosts: Record<string, HostState>;
 	draining: number[];
-	reference: Reference | null;
 	/** Memory amendment §3.1: each tile's largest reported memory figure, bytes, by instance id. */
 	memory: Record<string, number>;
+	/** Capacity amendment C8: "<instance>:<host>" → why the tile isn't offered to that host again; no expiry. */
+	marks: Record<string, Mark>;
+	/** Capacity amendment C7: the one reservation; absent (as in a file from before it): none. */
+	reserve?: Reserve;
 };
 
 /** Migrations of balancer.json. Append; never edit one. */
@@ -48,9 +48,7 @@ const MIGRATIONS: Migration[] = [
 export const STATE_FILE = "balancer.json";
 
 export function emptyState(): State {
-	return {
-		copies: {}, moves: [], bad: {}, wasRunning: [], hosts: {}, draining: [], reference: null, memory: {},
-	};
+	return { copies: {}, moves: [], bad: {}, wasRunning: [], hosts: {}, draining: [], memory: {}, marks: {} };
 }
 
 /**
@@ -60,6 +58,7 @@ export function emptyState(): State {
 export async function openState(dir: string): Promise<{ state: State; save: () => Promise<void> }> {
 	const file = path.join(dir, STATE_FILE);
 	const state = (await loadDataFile(file, MIGRATIONS) as State | undefined) ?? emptyState();
+	state.marks ??= {}; // capacity amendment C8: a file from before the marks has none; no schema bump
 	let chain: Promise<void> = Promise.resolve();
 	const save = () => {
 		chain = chain.catch(() => undefined).then(() => saveDataFile(file, MIGRATIONS, state));

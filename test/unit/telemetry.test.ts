@@ -4,7 +4,9 @@ import { KEEP_MS, SaveStalls, Telemetry, cpuMs, memBytes, memFigure, sample } fr
 
 test("a sample's UPS is the ticks over the time, its ms the CPU time over the ticks (§4.1)", () => {
 	const s = sample({ tick: 1000, cpuMs: 5000, at: 0 }, { tick: 1600, cpuMs: 6200, at: 10_000 });
-	assert.deepEqual(s, { at: 10_000, ups: 60, ms: 2, mem: null });
+	assert.deepEqual(s, { at: 10_000, ups: 60, ms: 2, mem: null, mainMs: null });
+	const main = sample({ tick: 0, cpuMs: 1, mainMs: 100, at: 0 }, { tick: 600, cpuMs: 2, mainMs: 700, at: 10_000 });
+	assert.equal(main?.mainMs, 1, "capacity C9: the main thread's CPU time over the ticks");
 	const withMem = sample({ tick: 1000, cpuMs: 1, at: 0, mem: 5 }, { tick: 1600, cpuMs: 2, at: 10_000, mem: 7 });
 	assert.equal(withMem?.mem, 7, "memory amendment §3.1: the newer reading's figure");
 	assert.equal(sample({ tick: 1000, cpuMs: null, at: 0 }, { tick: 1300, cpuMs: 9, at: 10_000 })?.ms, null);
@@ -16,6 +18,10 @@ test("cpuMs reads this process's CPU time from /proc, and null for a process tha
 	const ms = await cpuMs(process.pid);
 	assert.ok(ms !== null && ms > 0, `got ${ms}`);
 	assert.equal(await cpuMs(2 ** 30), null);
+	const main = await cpuMs(process.pid, true);
+	const all = await cpuMs(process.pid);
+	assert.ok(main !== null && main > 0 && main <= all!, `capacity C9: the main thread alone: ${main} of ${all}`);
+	assert.equal(await cpuMs(2 ** 30, true), null);
 });
 
 test("memory §3.1: a process's figure is max(VmHWM, VmRSS + VmSwap) in bytes; null with no /proc entry", async () => {
@@ -95,6 +101,14 @@ test("lagging (§5.5, R14): every sample of the last lag_minutes under the floor
 	assert.equal(t.lagging(5, 58, 180_000), false, "no samples");
 });
 
+test("lagging: a zero window is never lagging, whatever the UPS", () => {
+	const now = 1_000_000;
+	const t = new Telemetry(() => now);
+	t.add(1, Array.from({ length: 6 }, (_, i) => ({ at: now - (5 - i) * 10_000, ups: 60, ms: 1 })));
+	assert.equal(t.lagging(1, 58, 0), false, "healthy tile");
+	assert.equal(t.lagging(2, 58, 0), false, "no samples");
+});
+
 test("lagging (M1): a window longer than the retention behaves as the clamped one", () => {
 	const now = 1_000_000;
 	const t = new Telemetry(() => now);
@@ -112,6 +126,18 @@ test("mean (§5.6): the mean UPS and CPU ms per tick of the samples that ended i
 	assert.deepEqual(t.mean(7, now - 25_000, now), { ups: 60, ms: 2 });
 	assert.equal(t.mean(7, now, now + 1), undefined);
 	assert.equal(t.mean(8, 0, now), undefined);
+});
+
+test("capacity C9, C2: the main thread's mean beside all threads'; a moved tile keeps its last figure", () => {
+	const now = 1_000_000;
+	const t = new Telemetry(() => now);
+	t.add(7, [{ at: now - 10_000, ups: 60, ms: 4, mainMs: 1 }, { at: now, ups: 60, ms: 6 }]);
+	assert.deepEqual([t.meanMs(7), t.meanMs(7, "mainMs")], [5, 1]);
+	t.forget(7);
+	assert.deepEqual([t.last(7), t.meanMs(7), t.meanMs(7, "mainMs")], [undefined, 5, undefined],
+		"its load figure stands until its first sample on the new host");
+	t.add(7, [{ at: now, ups: 60, ms: null }]);
+	assert.equal(t.meanMs(7), undefined);
 });
 
 test("forget (S2): drops that instance's samples only", () => {

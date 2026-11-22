@@ -12,7 +12,7 @@ import type { ProxyStream } from "@clusterio/controller/dist/node/src/routes.js"
 type Controller = ControllerPluginContext["controller"];
 
 /**
- * A proxy stream as routes.ts:326-345 creates one;
+ * A proxy stream as routes.ts:425-451 (Clusterio 2.1.1) creates one;
  * createProxyStream isn't exported, so this mirrors it (plan ruling 9).
  * `/api/stream/<id>` serves its source to one GET, or takes a host's PUT as its source. It closes after
  * controller.proxy_stream_timeout unless both ends attach. With `file`, the source is that file, read once.
@@ -31,8 +31,10 @@ export function proxyStream(controller: Controller, file?: { path: string; size:
 		timeout: setTimeout(() => {
 			stream.events.emit("timeout");
 		}, controller.config.get("controller.proxy_stream_timeout") * 1000),
+		closed: false,
 	};
 	stream.events.on("close", () => {
+		stream.closed = true;
 		clearTimeout(stream.timeout);
 		controller.app.locals.streams.delete(id);
 		if (file) {

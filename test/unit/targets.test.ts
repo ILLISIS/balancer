@@ -2,58 +2,65 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { Move } from "../../contracts.js";
 import {
-	accepts, candidates, failoverCandidates, need, noRoom, overLimit, predictedMs, room, usedPct, verdict,
+	accepts, candidates, failoverCandidates, need, noRoom, offered, overLimit, room, roomable, usedPct, verdict,
 	type HostFact, type HostMemory, type MemoryFacts,
 } from "../../targets.js";
 
 const host = (id: number, extra: Partial<HostFact> = {}): HostFact => (
-	{ id, open: true, speed: null, slots: null, ...extra }
+	{ id, open: true, cores: 8, cap: null, ...extra }
 );
 
-test("§5.8: open hosts but the source, not lagging, under their slots; by free slots, then speed", () => {
+test("capacity C1, C2: open hosts but the source, none lagging; by all-thread CPU ms per core, then id", () => {
 	const hosts = [
-		host(1, { speed: 0.4 }), // the source
-		host(2, { speed: 0.9 }),
-		host(3, { speed: 0.5 }),
-		host(4, { speed: 0.3, open: false }), // disconnected, draining or benchmarking
-		host(5, { speed: 0.2 }), // a tile under the floor
-		host(6, { speed: 0.1, slots: 1 }), // full: 1 busy tile in 1 slot
-		host(7), // unbenchmarked, no busy tile
-		host(8), // unbenchmarked, 1 busy tile
+		host(1), // the source
+		host(2), // 12 ms on 8 cores: 1.5
+		host(3, { cores: 16 }), // 16 ms on 16 cores: 1
+		host(4, { open: false }), // disconnected or draining
+		host(5), // a tile under the floor
+		host(6), // nothing running: 0
+		host(7, { cores: null }), // no core count yet
+		host(8), // a running tile with no figure
+		host(9), // 12 ms on 8 cores: ties with 2
 	];
+	const on = (h: number, ...ids: number[]) => ids.map(id => ({ id, host: h, status: "running" }));
 	const tiles = [
-		{ id: 50, host: 5, status: "running" }, { id: 60, host: 6, status: "running" },
-		{ id: 80, host: 8, status: "running" },
+		...on(2, 20, 21), ...on(3, 30), ...on(5, 50), { id: 60, host: 6, status: "stopped" }, ...on(8, 80, 81),
+		...on(9, 90),
 	];
-	const ups: Record<number, number> = { 50: 57, 60: 60, 80: 60 };
-	const ms: Record<number, number> = { 60: 3, 80: 3 };
-	const last = (id: number) => (ups[id] === undefined ? undefined : { at: 1, ups: ups[id], ms: null });
-	assert.deepEqual(candidates(1, hosts, tiles, last, id => ms[id], 58, 2), [3, 2, 7, 8]);
+	const ms: Record<number, number> = { 20: 8, 21: 4, 30: 16, 50: 1, 60: 99, 80: 1, 90: 12 };
+	const last = (id: number) => ({ at: 1, ups: id === 50 ? 57 : 60, ms: null });
+	assert.deepEqual(candidates(1, hosts, tiles, last, id => ms[id], 58), [6, 3, 2, 9, 7, 8]);
 });
 
 test("a stopped tile's low UPS doesn't block its host", () => {
 	const hosts = [host(1), host(2)];
 	const tiles = [{ id: 20, host: 2, status: "stopped" }];
 	const last = () => ({ at: 1, ups: 10, ms: null });
-	assert.deepEqual(candidates(1, hosts, tiles, last, () => undefined, 58, 2), [2]);
+	assert.deepEqual(candidates(1, hosts, tiles, last, () => undefined, 58), [2]);
 });
 
-test("slots count busy tiles only (§5.8)", () => {
-	const hosts = [host(1, { speed: 0.5, slots: 2 })];
-	const tiles = [{ id: 10, host: 1, status: "running" }, { id: 11, host: 1, status: "running" }];
-	const ms: Record<number, number> = { 10: 3, 11: 0.5 };
-	assert.deepEqual(candidates(null, hosts, tiles, () => undefined, id => ms[id], 58, 2), [1], "1 busy of 2 slots");
-	ms[11] = 2;
-	assert.deepEqual(candidates(null, hosts, tiles, () => undefined, id => ms[id], 58, 2), [], "2 busy of 2 slots");
-});
-
-test("C11: a host with an empty tile list ranks before one that reports no CPU readings", () => {
+test("capacity C2: tiles moving to a host count at their last figure, each once", () => {
 	const hosts = [host(1), host(2)];
-	const tiles = [{ id: 10, host: 1, status: "running" }];
-	assert.deepEqual(candidates(null, hosts, tiles, () => undefined, () => undefined, 58, 2), [2, 1]);
+	const tiles = [
+		{ id: 10, host: 1, status: "running" }, { id: 20, host: 2, status: "running" },
+		{ id: 30, host: 3, status: "running" },
+	];
+	const ms: Record<number, number> = { 10: 4, 20: 3, 30: 5 };
+	const rank = (arriving?: (h: number) => number[]) => (
+		candidates(null, hosts, tiles, () => undefined, id => ms[id], 58, undefined, arriving)
+	);
+	assert.deepEqual(rank(), [2, 1]);
+	assert.deepEqual(rank(h => (h === 2 ? [20, 30] : [])), [1, 2], "30 is on its way to 2: 8 ms there; 20 once");
+	assert.deepEqual(rank(h => (h === 2 ? [31] : [])), [2, 1], "an arrival with no figure counts 0");
 });
 
-test("C2/C3: the pre-flight verdict", () => {
+test("capacity C3: a capped host is eligible only while it runs fewer tiles than its cap", () => {
+	const tiles = [{ id: 10, host: 1, status: "running" }, { id: 11, host: 1, status: "running" }];
+	const rank = (cap: number) => candidates(null, [host(1, { cap })], tiles, () => undefined, () => 1, 58);
+	assert.deepEqual([rank(2), rank(3)], [[], [1]]);
+});
+
+test("the pre-flight verdict (capacity C4: the controller passes 1000 / failover_floor as the ms line)", () => {
 	assert.equal(verdict(5, 60, 10, 58, true), true);
 	assert.equal(verdict(12, 60, 10, 58, true), false);
 	assert.equal(verdict(5, 40, 10, 58, true), false);
@@ -61,37 +68,18 @@ test("C2/C3: the pre-flight verdict", () => {
 	assert.equal(verdict(5, null, 10, 58, true), false);
 });
 
-test("ranking by headroom: more free slots first, equal free slots fastest first", () => {
-	const hosts = [
-		host(1, { speed: 0.3, slots: 2 }), host(2, { speed: 0.9, slots: 4 }), host(3, { speed: 0.5, slots: 4 }),
-		host(4, { speed: 0.1 }),
-	];
-	assert.deepEqual(candidates(null, hosts, [], () => undefined, () => undefined, 58, 2), [4, 3, 2, 1]);
-});
-
 test("fits drops a host", () => {
-	const hosts = [host(1, { speed: 0.3 }), host(2, { speed: 0.5 })];
-	assert.deepEqual(candidates(null, hosts, [], () => undefined, () => undefined, 58, 2, h => h !== 1), [2]);
+	assert.deepEqual(candidates(null, [host(1), host(2)], [], () => undefined, () => undefined, 58, h => h !== 1), [2]);
 });
 
-test("predictedMs scales by the speed ratio", () => {
-	assert.equal(predictedMs(10, 1, 0.5), 5);
-});
-
-test("failover: hosts with room first, then full ones; under the emergency floor and `from` excluded", () => {
-	const hosts = [
-		host(1, { speed: 0.5 }), host(2, { speed: 0.9, slots: 1 }), host(3, { speed: 0.4, slots: 1 }),
-		host(4, { speed: 0.2, slots: 1 }), host(5, { speed: 0.6, slots: 3 }),
-	];
-	const tiles = [
-		{ id: 20, host: 2, status: "running" }, { id: 30, host: 3, status: "running" },
-		{ id: 40, host: 4, status: "running" },
-	];
-	const ups: Record<number, number> = { 20: 50, 30: 55, 40: 40 };
+test("failover: eligible hosts first, then the others by their lowest UPS, then load; under 45 and `from` out", () => {
+	const hosts = [host(1), host(2), host(3), host(4), host(5), host(6, { cap: 1 }), host(7)];
+	const tiles = [20, 30, 40, 60, 70].map(id => ({ id, host: id / 10, status: "running" }));
+	const ups: Record<number, number> = { 20: 50, 30: 55, 40: 40, 60: 60, 70: 50 };
+	const ms: Record<number, number> = { 20: 3, 30: 3, 40: 3, 60: 3, 70: 1 };
 	const last = (id: number) => ({ at: 1, ups: ups[id], ms: null });
-	const ms = () => 3;
-	assert.deepEqual(failoverCandidates(1, hosts, tiles, last, ms, 58, 45, 2), [5, 3, 2], "4 has a tile under 45");
-	assert.deepEqual(failoverCandidates(1, hosts.filter(h => h.id !== 5), tiles, last, ms, 58, 45, 2), [3, 2]);
+	assert.deepEqual(failoverCandidates(1, hosts, tiles, last, id => ms[id], 58, 45), [5, 6, 3, 7, 2],
+		"6 is at its cap, which tier 2 ignores (C3); 7 and 2 both sit at 50 UPS, 7 with less load; 4 is under 45");
 });
 
 const GIB = 2 ** 30;
@@ -174,10 +162,7 @@ test("memory §3.3, M5: noRoom says why a tile doesn't fit, in MB", () => {
 });
 
 test("memory §3.4, M4: a host without room is dropped from tier 1 and from tier 2", () => {
-	const hosts = [
-		host(1, { speed: 0.5 }), host(2, { speed: 0.9, slots: 1 }), host(3, { speed: 0.4, slots: 1 }),
-		host(4, { speed: 0.2, slots: 1 }), host(5, { speed: 0.6, slots: 3 }),
-	];
+	const hosts = [host(1), host(2), host(3), host(4), host(5)];
 	const tiles = [
 		{ id: 20, host: 2, status: "running" }, { id: 30, host: 3, status: "running" },
 		{ id: 40, host: 4, status: "running" },
@@ -185,8 +170,8 @@ test("memory §3.4, M4: a host without room is dropped from tier 1 and from tier
 	const ups: Record<number, number> = { 20: 50, 30: 55, 40: 40 };
 	const last = (id: number) => ({ at: 1, ups: ups[id], ms: null });
 	const ms = () => 3;
-	assert.deepEqual(failoverCandidates(1, hosts, tiles, last, ms, 58, 45, 2), [5, 3, 2]);
-	assert.deepEqual(failoverCandidates(1, hosts, tiles, last, ms, 58, 45, 2, h => h !== 5 && h !== 3), [2],
+	assert.deepEqual(failoverCandidates(1, hosts, tiles, last, ms, 58, 45), [5, 3, 2]);
+	assert.deepEqual(failoverCandidates(1, hosts, tiles, last, ms, 58, 45, h => h !== 5 && h !== 3), [2],
 		"5 (tier 1) and 3 (tier 2) have no room: best effort never overrides it");
 });
 
@@ -212,4 +197,65 @@ test("memory §3.6, M1: accepts is false while draining, false without room for 
 	assert.equal(accepts(f, [1], 1), false, "draining");
 	assert.equal(accepts(facts({ figures: { 7: 5 * GIB } }), [], 1), false,
 		"a new tile needs 6 GiB: the largest × 1.2");
+});
+
+test("capacity C8: a marked host isn't offered; a failover or drain takes one with no unmarked host left", () => {
+	const marked = (h: number) => h === 2 || h === 5;
+	const none = () => false;
+	assert.deepEqual(offered([2, 3, 5, 4], marked, none, false), [3, 4], "an overload or memory move");
+	assert.deepEqual(offered([2, 3, 5, 4], marked, none, true), [3, 4], "unmarked hosts are eligible: only those");
+	const bad = (h: number) => h === 3 || h === 5;
+	assert.deepEqual(offered([2, 3, 5], marked, bad, true), [2], "3 failed its pre-flight: the marked host is left");
+	assert.deepEqual(offered([2, 3, 5], marked, bad, false), [], "never, for any other move");
+	assert.deepEqual(offered([], marked, none, true), []);
+});
+
+test("capacity C7: room counts the reserved tile on its host for every other tile; not once expired", () => {
+	const reserve = { instanceId: 7, host: 1, until: NOW + 1 };
+	const f = facts({ figures: { 7: 5 * GIB }, memory: () => reading(1), reserve });
+	near(room(f, 1, null), 3 * GIB, "9 GiB less 7's 6 GiB need, though 7 isn't there yet");
+	near(room(f, 1, 8), 3 * GIB, "for any other tile");
+	near(room(f, 1, 7), 8 * GIB, "not for the tile itself");
+	near(room(f, 2, null), 8 * GIB, "nor on another host");
+	assert.equal(accepts(f, [], 1), false, "a new tile needs 6 GiB too: gridworld places none there");
+	f.reserve = { ...reserve, until: NOW };
+	near(room(f, 1, null), 8 * GIB, "past its until it counts for nothing");
+	assert.equal(accepts(f, [], 1), true);
+});
+
+test("capacity C5, C7 step 1: a short host is tested only within its available bytes, if room can be made", () => {
+	const tiles = [{ id: 20, host: 1, status: "running" }, { id: 21, host: 1, status: "running" }];
+	const f = facts({ figures: { 7: 5 * GIB, 20: 2 * GIB, 21: GIB }, tiles });
+	assert.equal(noRoom(f, 7, 1), "host 1 has room for 5120 MB, it needs 6144 MB");
+	assert.equal(roomable(f, 7, 1, [21]), true, "6 GiB available; 5 GiB of room and 21's 1.2 GiB cover 6 GiB");
+	assert.equal(roomable(f, 7, 1, []), false, "step 1: no empty tile there has a target");
+	f.memory = () => reading(4.5);
+	assert.equal(roomable(f, 7, 1, [20, 21]), false, "5.5 GiB available: the test's copy wouldn't fit");
+	f.memory = () => reading(4, 60_001);
+	assert.equal(roomable(f, 7, 1, [20, 21]), false, "no fresh reading");
+});
+
+test("capacity C7 step 1: where `used` binds, a tile that leaves frees its figure, not its need", () => {
+	// Host 1: 5 GiB limit, 4.5 used: 0.5 of room. Three empty tiles of figure 1 GiB. T (7): figure 3.3 GiB, need 3.96.
+	const tiles = [20, 21, 22].map(id => ({ id, host: 1, status: "running" }));
+	const f = facts({ figures: { 7: 3.3 * GIB, 20: GIB, 21: GIB, 22: GIB }, tiles, memory: () => reading(4.5) });
+	f.limits.set(1, 50);
+	assert.equal(roomable(f, 7, 1, [20, 21, 22]), false, "0.5 + 3 × 1.2 would say 4.1: all three free 3, so 3.5");
+	f.figures[7] = 2.8 * GIB;
+	assert.equal(roomable(f, 7, 1, [20, 21, 22]), true, "a need of 3.36 fits in 3.5");
+});
+
+test("capacity C7 step 1: a leaving tile with no recorded figure frees nothing of `used`", () => {
+	// As above, but 22 has no figure: need() would stand in T's 2.8 GiB for it, which no eviction gives back.
+	const tiles = [20, 21, 22].map(id => ({ id, host: 1, status: "running" }));
+	const f = facts({ figures: { 7: 2.8 * GIB, 20: GIB, 21: GIB }, tiles, memory: () => reading(4.5) });
+	f.limits.set(1, 50);
+	assert.equal(roomable(f, 7, 1, [20, 21, 22]), false, "0.5 + 1 + 1 = 2.5 is short of a 3.36 need");
+});
+
+test("capacity C7, the two-host limit: an evicted tile's only target is the lagging tile's host: ineligible", () => {
+	const tiles = [{ id: 7, host: 1, status: "running" }, { id: 20, host: 2, status: "running" }];
+	const last = (id: number) => ({ at: 1, ups: id === 7 ? 50 : 60, ms: null });
+	assert.deepEqual(candidates(2, [host(1), host(2)], tiles, last, () => 1, 58), [], "so step 1 finds none evictable");
+	assert.deepEqual(candidates(2, [host(1), host(2), host(3)], tiles, last, () => 1, 58), [3]);
 });

@@ -41,6 +41,7 @@ test("the host sends its limit and memory at connect, on a change and every 10 s
 		assert.deepEqual(limits(), [90]);
 		assert.equal(reports()[0].capacity, os.totalmem(), "the machine's memory, as Clusterio's SystemInfo reads it");
 		assert.ok(reports()[0].available > 0 && reports()[0].available <= reports()[0].capacity);
+		assert.equal(reports()[0].cores, os.availableParallelism(), "capacity C2: its core count");
 		config["balancer.memory_limit_pct"] = 95;
 		await hooks.fieldChanged("balancer.memory_limit_pct", 95, 90);
 		await hooks.fieldChanged("balancer.fence_minutes", 10, 12);

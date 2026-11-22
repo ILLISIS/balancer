@@ -1,7 +1,7 @@
 import type * as lib from "@clusterio/lib";
 import {
-	BenchmarkRequest, DrainRequest, FactorioVersionEvent, HostBenchmarkRequest, HostLeavingEvent, HostMemoryEvent,
-	MoveRequest, PreflightRequest, StatusRequest, TelemetryEvent,
+	ClearMarksRequest, DrainRequest, HostLeavingEvent, HostMemoryEvent, MoveRequest, PreflightRequest, StatusRequest,
+	TelemetryEvent,
 } from "./contracts.js";
 
 declare module "@clusterio/lib" {
@@ -11,12 +11,9 @@ declare module "@clusterio/lib" {
 		"balancer.ups_floor": number;
 		"balancer.failover_floor": number;
 		"balancer.lag_minutes": number;
-		"balancer.busy_tile_ms": number;
-		"balancer.preflight_max_ms": number;
 		"balancer.after_check_minutes": number;
 		"balancer.max_concurrent_moves": number;
 		"balancer.bad_pair_hours": number;
-		"balancer.reference_save": string | null;
 	}
 	export interface HostConfigFields {
 		"balancer.fence_minutes": number;
@@ -48,8 +45,7 @@ export const plugin: lib.PluginDeclaration = {
 		"balancer.enabled": {
 			title: "Enabled",
 			description: "The automatic rules: failover, overload and the after-check's re-move. Drain, manual " +
-				"moves, the join benchmark and save copies run either way. After-checks are still judged and " +
-				"recorded.",
+				"moves and save copies run either way. After-checks are still judged and recorded.",
 			type: "boolean",
 			initialValue: true,
 		},
@@ -63,17 +59,16 @@ export const plugin: lib.PluginDeclaration = {
 		),
 		"balancer.failover_floor": number(
 			"Failover floor",
-			"When no host has a free slot, a gone host's tile may go to a full host whose tiles stay at this UPS " +
-			"or above (live and in its pre-flight). Below balancer.ups_floor.",
+			"When no host is eligible, a gone host's tile may go to a host whose tiles stay at this UPS or above " +
+			"(live and in its pre-flight). Below balancer.ups_floor. Every pre-flight fails a tile that " +
+			"benchmarks at 1000 / this many ms per tick or more.",
 			45,
-		),
-		"balancer.busy_tile_ms": number("Busy tile", "CPU ms per tick from which a tile counts as busy (§5.8).", 2),
-		"balancer.preflight_max_ms": number(
-			"Pre-flight limit", "The pre-flight fails when the tile benchmarks at this many ms per tick or more.", 10,
 		),
 		"balancer.max_concurrent_moves": number("Concurrent moves", "Moves in progress at once in the cluster.", 3),
 		"balancer.bad_pair_hours": number(
-			"Bad pair hours", "Hours a tile isn't offered again to a host after a failed pre-flight or after-check.",
+			"Bad pair hours",
+			"Hours a tile isn't offered again to a host after a failed pre-flight or after-check, and hours a host " +
+			"whose tiles slowed after a tile arrived takes no more tiles than it carried before.",
 			24,
 		),
 		"balancer.lag_minutes": number(
@@ -85,14 +80,6 @@ export const plugin: lib.PluginDeclaration = {
 		"balancer.after_check_minutes": number(
 			"After-check", "Minutes after a move until it is judged on its target, by its last 5 minutes (§5.6).", 10,
 		),
-		"balancer.reference_save": {
-			title: "Reference save",
-			description: "A vanilla save on the controller (a path) the join benchmark runs with no mods (§5.7). " +
-				"Empty: a copy of the busiest tile, with its mod pack. A new path benchmarks quiet hosts again " +
-				"(hosts with nothing running); the others on \"benchmark now\".",
-			type: "string",
-			optional: true,
-		},
 	},
 	hostConfigFields: {
 		"balancer.fence_minutes": number(
@@ -110,9 +97,8 @@ export const plugin: lib.PluginDeclaration = {
 		),
 	},
 	messages: [
-		HostLeavingEvent, TelemetryEvent, PreflightRequest, MoveRequest, StatusRequest, FactorioVersionEvent,
-		HostBenchmarkRequest, DrainRequest, BenchmarkRequest,
-		HostMemoryEvent,
+		HostLeavingEvent, TelemetryEvent, PreflightRequest, MoveRequest, StatusRequest, DrainRequest, HostMemoryEvent,
+		ClearMarksRequest,
 	],
 	permissions: [
 		{
@@ -124,7 +110,7 @@ export const plugin: lib.PluginDeclaration = {
 		{
 			name: "balancer.move",
 			title: "Move tiles",
-			description: "Move tiles, drain hosts and run the join benchmark.",
+			description: "Move tiles, drain hosts and clear a host's marks.",
 		},
 	],
 };

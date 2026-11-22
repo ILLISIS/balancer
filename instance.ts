@@ -4,8 +4,9 @@ import { local } from "./local.js";
 import { REPORT_EVERY, SAMPLE_MS, SaveStalls, cpuMs, memBytes, sample, type Reading } from "./telemetry.js";
 
 /**
- * The instance plugin (§4.1): every 10 s, game.tick over RCON and the Factorio process's CPU time. The samples go to
- * the controller once a minute, or each one at once while this host runs a pre-flight (`local.preflights`).
+ * The instance plugin (§4.1): every 10 s, game.tick over RCON and the Factorio process's CPU time, over all threads
+ * and on its main thread (capacity amendment C9). The samples go to the controller once a minute, or each one at once
+ * while this host runs a pre-flight (`local.preflights`).
  */
 export default async function loadInstancePlugin(context: InstancePluginContext) {
 	const { instance, logger, plugin } = context;
@@ -22,7 +23,8 @@ export default async function loadInstancePlugin(context: InstancePluginContext)
 		}
 		const pid = instance.server.pid;
 		return {
-			tick, cpuMs: pid ? await cpuMs(pid) : null, mem: pid ? await memBytes(pid) : null, at: Date.now(),
+			tick, cpuMs: pid ? await cpuMs(pid) : null, mainMs: pid ? await cpuMs(pid, true) : null,
+			mem: pid ? await memBytes(pid) : null, at: Date.now(),
 		};
 	};
 

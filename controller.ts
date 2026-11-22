@@ -6,17 +6,17 @@ import type { ControllerPluginContext } from "@clusterio/controller";
 import { lifecycle, rateLimited } from "universal_edges/runtime";
 import { setBalancerApi } from "./api.js";
 import {
-	BenchmarkRequest, DrainRequest, FactorioVersionEvent, HostBenchmarkRequest, HostLeavingEvent, HostMemoryEvent,
-	MoveRequest, PreflightRequest, StatusRequest, TelemetryEvent, type Check, type Move, type Status,
+	ClearMarksRequest, DrainRequest, HostLeavingEvent, HostMemoryEvent, MoveRequest, PreflightRequest, RESERVE_MS,
+	StatusRequest, TelemetryEvent, type Check, type Move, type Status,
 } from "./contracts.js";
-import { applyCheck, benchmarksDue, decide, dueChecks, memoryTimers, type Add, type View } from "./decider.js";
-import { RETRY_FAILED_MS, adoptOrphans, failovers, forget, goneHosts, wasRunningBefore } from "./failover.js";
-import { Mover, type MoverPort } from "./mover.js";
+import { applyCheck, clearMarks, decide, dueChecks, markOf, memoryTimers, type Add, type View } from "./decider.js";
+import { RETRY_FAILED_MS, adoptOrphans, failovers, forget, goneHosts, stranded, wasRunningBefore } from "./failover.js";
+import { Mover, ended, type MoverPort } from "./mover.js";
 import { openState } from "./state.js";
 import { SaveStore, copyable } from "./store.js";
 import {
-	accepts, candidates, failoverCandidates, limitPct, mb, need, noRoom, overLimit, predictedMs, room, usedPct, verdict,
-	type MemoryFacts,
+	accepts, candidates, failoverCandidates, limitPct, mb, need, noRoom, offered, overLimit, room, roomable, usedPct,
+	verdict, withinAvailable, type MemoryFacts,
 } from "./targets.js";
 import { SAMPLE_MS, Telemetry } from "./telemetry.js";
 import { proxyStream, pull, push } from "./transfer.js";
@@ -63,6 +63,8 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 	const limits = new Map<number, number>();
 	/** MR-C1: each host's machine memory from its last HostMemoryEvent, bytes, `at` the controller's clock then. */
 	const readings = new Map<number, { capacity: number; available: number; at: number }>();
+	/** Capacity amendment C2: each host's core count from its last HostMemoryEvent. */
+	const cores = new Map<number, number>();
 	const store = new SaveStore(state, path.join(dir, "balancer", "saves"), {
 		pull: (id, name, file) => pull(controller, id, name, file),
 		host: id => controller.instances.get(id)?.config.get("instance.assigned_host") ?? null,
@@ -91,26 +93,26 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 		await controller.sendTo({ instanceId: id }, new lib.InstanceSendRconRequest(command)),
 	);
 
-	/** Hosts running the join benchmark now (R11): not targets, not overload sources. */
-	const benchmarking = new Set<number>();
-	const speedOf = (hostId: number) => state.hosts[hostId]?.bench?.speed ?? null;
-	/** §5.6: learned slots override the benchmark's; null: no limit. */
-	const slotsOf = (hostId: number) => state.hosts[hostId]?.learned ?? state.hosts[hostId]?.bench?.slots ?? null;
-	/** A host's busy tiles (§5.8): running, at balancer.busy_tile_ms or more. */
-	const busyOn = (hostId: number) => tiles().filter(t => t.host === hostId && t.status === "running"
-		&& (telemetry.meanMs(t.id) ?? 0) >= config.get("balancer.busy_tile_ms")).length;
+	/** Capacity amendment C3: a host's cap while it stands; null: none, or expired. */
+	const capOf = (hostId: number) => {
+		const cap = state.hosts[hostId]?.cap;
+		return cap && cap.until > Date.now() ? cap : null;
+	};
 	/** §5.8's view of the hosts. */
 	const hostFacts = () => [...controller.hosts.values()].map(h => ({
 		id: h.id,
-		open: h.connected && !state.draining.includes(h.id) && !benchmarking.has(h.id),
-		speed: speedOf(h.id),
-		slots: slotsOf(h.id),
+		open: h.connected && !state.draining.includes(h.id),
+		cores: cores.get(h.id) ?? null,
+		cap: capOf(h.id)?.tiles ?? null,
 	}));
+	/** C2: the tiles of the unfinished moves to a host, but `id`'s own. */
+	const arriving = (id: number) => (hostId: number) => state.moves
+		.filter(m => !ended(m) && m.to === hostId && m.instanceId !== id).map(m => m.instanceId);
 
-	/** Tier 1 of §5.8: the strict candidates for a tile on `from`. */
-	const strict = (from: number | null, fits?: (hostId: number) => boolean) => candidates(
+	/** Tier 1 of §5.8: the strict candidates for tile `id` on `from`. */
+	const strict = (id: number, from: number | null, fits?: (hostId: number) => boolean) => candidates(
 		from, hostFacts(), tiles(), i => telemetry.last(i), i => telemetry.meanMs(i),
-		config.get("balancer.ups_floor"), config.get("balancer.busy_tile_ms"), fits,
+		config.get("balancer.ups_floor"), fits, arriving(id),
 	);
 
 	/** Memory amendment §3.1–§3.3: what the memory rule reads now (MR1). */
@@ -121,22 +123,42 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 		limits,
 		tiles: tiles(),
 		moves: state.moves,
+		reserve: state.reserve,
 	});
+	/**
+	 * Capacity amendment C5, C7 step 1: tile `id`, short of memory on the host, may be tested there and have room made:
+	 * no reservation stands (there is one at most), and `roomable` over the host's empty tiles that have a target. The
+	 * tile's own host is no target while it lags there (§5.8), so with two hosts none has one.
+	 */
+	const short = (f: MemoryFacts, id: number, hostId: number): boolean => state.reserve === undefined && roomable(
+		f, id, hostId,
+		tiles().filter(t => t.host === hostId && t.status === "running" && players(t.id) === 0 && port.hasCopy(t.id)
+			&& !moves.moving(t.id) && port.candidates(t.id, hostId, "room", true).length > 0).map(t => t.id),
+	);
 	accepting = h => accepts(memoryFacts(), state.draining, h);
 
 	const port: MoverPort = {
 		now: Date.now,
 		wait: ms => sleep(ms),
-		candidates: (id, from, reason, runs) => {
+		candidates: (id, from, reason, runs, measure, tried = []) => {
 			const floor = config.get("balancer.ups_floor");
 			const f = memoryFacts();
 			// Memory amendment §3.3–§3.4: a tile that will run on the target must fit there, for every reason; a
-			// stopped tile's drain runs nothing (MR3).
-			const roomy = (h: number) => !runs || noRoom(f, id, h) === undefined;
+			// stopped tile's drain runs nothing (MR3). Capacity amendment C5: a measured tile may be short (`short`).
+			const roomy = (h: number) => !runs || noRoom(f, id, h) === undefined
+				|| (measure === true && short(f, id, h));
+			// Capacity amendment C8: no host the tile is marked on, but as a failover's or a drain's last resort. Every
+			// other reason, a `room` eviction (C7) too, never takes one; a move to a host the owner names asks no one.
+			// The hosts the move has tried are out first: an errored pre-flight marks no bad pair (C46).
+			const offer = (ranked: number[]) => offered(
+				ranked.filter(h => !tried.includes(h)), h => `${id}:${h}` in state.marks,
+				h => (state.bad[`${id}:${h}`] ?? 0) > f.now,
+				reason === "failover" || reason === "drain",
+			);
 			if (reason === "failover") {
 				const ranked = (fits?: (hostId: number) => boolean) => failoverCandidates(
 					from, hostFacts(), tiles(), i => telemetry.last(i), i => telemetry.meanMs(i), floor,
-					config.get("balancer.failover_floor"), config.get("balancer.busy_tile_ms"), fits,
+					config.get("balancer.failover_floor"), fits, arriving(id),
 				);
 				const found = ranked(roomy);
 				if (found.length === 0 && ranked().length > 0) {
@@ -147,28 +169,29 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 						instance: id, need_mb: mb(need(f.figures, id)), room_mb: Object.fromEntries(rooms),
 					}, "warn");
 				}
-				return found;
+				return offer(found);
 			}
-			let fits = roomy;
-			if (reason === "overload") {
-				const ms = telemetry.meanMs(id);
-				const fromSpeed = from === null ? null : speedOf(from);
-				fits = h => {
-					const toSpeed = speedOf(h);
-					return roomy(h) && (ms === undefined || fromSpeed === null || toSpeed === null
-						|| predictedMs(ms, fromSpeed, toSpeed) < 1000 / floor);
-				};
+			return offer(strict(id, from, roomy));
+		},
+		reserve: (id, hostId) => {
+			if (state.reserve !== undefined) {
+				return false;
 			}
-			return strict(from, fits);
+			state.reserve = { instanceId: id, host: hostId, until: Date.now() + RESERVE_MS };
+			lifecycle(logger, "balancer.room", "reserved", { ...state.reserve });
+			return true; // the move's end writes balancer.json
 		},
 		hostConnected: h => controller.hosts.get(h)?.connected ?? false,
 		noRoom: (id, hostId) => noRoom(memoryFacts(), id, hostId),
+		testable: (id, hostId) => withinAvailable(memoryFacts(), id, hostId),
 		status: id => instance(id)?.status ?? "unknown",
 		players,
 		loadedSave: id => {
 			const files = [...controller.saves.values()].filter(s => s.instanceId === id && copyable(s));
 			return (files.find(s => s.loaded) ?? files.sort((a, b) => b.mtimeMs - a.mtimeMs)[0])?.name;
 		},
+		saveMtime: (id, name) => [...controller.saves.values()].find(s => s.instanceId === id && s.name === name)
+			?.mtimeMs,
 		hasCopy: id => store.copy(id) !== undefined,
 		// §5.2 step 1: the copy goes to the target through a proxy stream; its tiles' samples during the run, plus the
 		// one that covers its end, are the UPS check (plan ruling 4).
@@ -179,15 +202,23 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 			if (!inst || !pack) {
 				throw new Error(`instance ${id} has no mod pack`);
 			}
-			// A failover target outside tier 1 (a full host) is judged on the emergency floor. Decided before the run,
-			// whose own load can drop the host's tiles out of tier 1.
+			// A failover target outside tier 1 (a lagging or capped host) is judged on the emergency floor. Decided
+			// before the run, whose own load can drop the host's tiles out of tier 1.
 			const emergency = reason === "failover"
-				&& !strict(inst.config.get("instance.assigned_host") ?? null).includes(hostId);
+				&& !strict(id, inst.config.get("instance.assigned_host") ?? null).includes(hostId);
 			const file = store.file(id);
 			const stream = proxyStream(controller, { path: file, size: (await fs.stat(file)).size });
 			const from = Date.now();
 			try {
-				const version = inst.config.get("factorio.version");
+				// A release channel is resolved as Instance.fromConfig does; the host looks up the version it names.
+				let version: string = inst.config.get("factorio.version");
+				if (lib.isReleaseChannel(version)) {
+					const resolved = lib.resolveReleaseChannel(await controller.latestReleases.get(), version);
+					if (!resolved) {
+						throw new Error(`cannot resolve Factorio release channel '${version}'`);
+					}
+					version = resolved;
+				}
 				const r = await controller.sendTo(
 					{ hostId }, new PreflightRequest(id, stream.id, pack, version, PREFLIGHT_TICKS),
 				);
@@ -195,11 +226,12 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 				const running = tiles().filter(t => t.host === hostId && t.status === "running");
 				const ups = running.flatMap(t => telemetry.minUps(t.id, from, Date.now()) ?? []);
 				const minUps = ups.length > 0 ? Math.min(...ups) : null;
+				// Capacity amendment C4: the ms line is the failover budget, whatever floor judges the target's tiles.
 				const pass = verdict(
-					r.msPerTick, minUps, config.get("balancer.preflight_max_ms"),
+					r.msPerTick, minUps, 1000 / config.get("balancer.failover_floor"),
 					config.get(emergency ? "balancer.failover_floor" : "balancer.ups_floor"), running.length > 0,
 				);
-				return { pass, msPerTick: r.msPerTick, minUps, busy: busyOn(hostId) };
+				return { pass, msPerTick: r.msPerTick, minUps, tiles: running.length };
 			} finally {
 				stream.events.emit("close");
 			}
@@ -231,7 +263,7 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 			await persist();
 			return name;
 		},
-		start: async (id, name) => {
+		start: async (id, name?) => {
 			await controller.sendTo({ instanceId: id }, new lib.InstanceStartRequest(name));
 		},
 		save: persist,
@@ -335,155 +367,25 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 		lifecycle(logger, "balancer.drain", request.on ? "on" : "off", { host: request.hostId });
 	});
 
-	/** §5.7: each host's newest Factorio, as it reported at its last connect (R8). */
-	const versions = new Map<number, string>();
-	/** Hosts whose benchmark failed this session: not run again automatically before they reconnect. */
-	const benchFailed = new Set<number>();
-	const referenceFile = path.join(dir, "balancer", "reference.zip");
-	/** R7: the reference a result was measured on; undefined until the default one is frozen. */
-	const referenceKey = (): string | undefined => {
-		const set = config.get("balancer.reference_save");
-		if (set) {
-			return `file:${path.resolve(set)}`;
-		}
-		return state.reference ? `tile:${state.reference.instanceId}` : undefined;
-	};
-	/**
-	 * P5, R7: balancer.reference_save, with no mods on the host's newest Factorio; unset, the busiest tile's copy (at
-	 * balancer.busy_tile_ms or more), with that tile's mod pack and Factorio version, frozen at its first need.
-	 * Undefined while there is none.
-	 */
-	/** A reference to run: its file, mod pack, Factorio version and key, and its tile (null: the operator's file). */
-	type Ref = { file: string; modPack: lib.ModPack | null; version: string; key: string; instanceId: number | null };
-	const reference = async (): Promise<Ref | undefined> => {
-		const set = config.get("balancer.reference_save");
-		if (set) {
-			const file = path.resolve(set);
-			return { file, modPack: null, version: "latest", key: `file:${file}`, instanceId: null };
-		}
-		if (!state.reference) {
-			const ms = (id: number) => telemetry.meanMs(id) ?? 0;
-			const [pick] = [...controller.instances.values()]
-				.filter(i => store.copy(i.id) !== undefined && ms(i.id) >= config.get("balancer.busy_tile_ms"))
-				.sort((a, b) => ms(b.id) - ms(a.id));
-			if (!pick) {
-				return undefined;
-			}
-			await fs.mkdir(path.dirname(referenceFile), { recursive: true });
-			await fs.copyFile(store.file(pick.id), referenceFile);
-			state.reference = {
-				instanceId: pick.id,
-				modPackId: pick.config.get("factorio.mod_pack_id") ?? config.get("controller.default_mod_pack_id"),
-				version: pick.config.get("factorio.version"),
-			};
-			await persist();
-			lifecycle(logger, "balancer.benchmark", "reference", { instance: pick.id, ms_per_tick: ms(pick.id) });
-		}
-		const { instanceId, modPackId, version } = state.reference;
-		const modPack = modPackId === null ? null : controller.modPacks.get(modPackId);
-		if (modPack === undefined) {
-			throw new Error(`the reference's mod pack ${modPackId} no longer exists`);
-		}
-		return { file: referenceFile, modPack, version, key: `tile:${instanceId}`, instanceId };
-	};
-	/**
-	 * §5.7: stream the reference to the host (per run) and run the join benchmark there; record its speed and slots.
-	 * "Benchmark now" (`operator`) also clears the host's learned slots (R10). A rejected or failed run leaves the host
-	 * unbenchmarked (§5.7) and is logged.
-	 */
-	const runBenchmark = async (hostId: number, operator: boolean) => {
-		benchmarking.add(hostId);
-		const started = Date.now();
-		try {
-			const ref = await reference();
-			if (!ref) {
-				throw new Error("no reference save yet");
-			}
-			// Memory amendment §3.4 (M7): as many copies as fit, every tile on the host counted; 0 fails on the host,
-			// which stays unbenchmarked (MR13).
-			const f = memoryFacts();
-			const maxCopies = Math.max(0, Math.floor(room(f, hostId, null) / need(f.figures, ref.instanceId)));
-			lifecycle(logger, "balancer.benchmark", "started", {
-				host: hostId, reference: ref.key, operator, max_copies: maxCopies,
-			});
-			const stream = proxyStream(controller, { path: ref.file, size: (await fs.stat(ref.file)).size });
-			try {
-				const r = await controller.sendTo(
-					{ hostId }, new HostBenchmarkRequest(stream.id, ref.modPack, ref.version, maxCopies),
-				);
-				const host = state.hosts[hostId] ?? {};
-				const version = versions.get(hostId) ?? "unknown";
-				host.bench = { speed: r.speed, slots: r.slots, version, ref: ref.key, at: Date.now() };
-				if (operator) {
-					delete host.learned;
-				}
-				state.hosts[hostId] = host;
-				benchFailed.delete(hostId);
-				lifecycle(logger, "balancer.benchmark", "done", {
-					host: hostId, speed: r.speed, slots: r.slots, cores: r.cores, runs: r.runs,
-					wall_ms: Date.now() - started,
-				});
-			} finally {
-				stream.events.emit("close");
-			}
-		} catch (err: any) {
-			benchFailed.add(hostId);
-			delete state.hosts[hostId]?.bench;
-			lifecycle(logger, "balancer.benchmark", "failed", { host: hostId, error: err.message }, "warn");
-		} finally {
-			benchmarking.delete(hostId);
-			await persist();
-		}
-	};
-	/** §5.7, R3: each pass, the join benchmark starts on each quiet host whose result is missing or stale. */
-	const benchmarks = (v: View) => {
-		const key = referenceKey();
-		if (key === undefined) {
-			// Freezes the default reference once a tile is busy; the next pass benchmarks.
-			void reference().catch((err: Error) => {
-				logger.error(`balancer: freezing the reference save failed: ${err.message}`);
-			});
-			return;
-		}
-		const skip = (h: number) => benchmarking.has(h) || benchFailed.has(h);
-		for (const h of benchmarksDue(v, versions, state.hosts, key, skip)) {
-			void runBenchmark(h, false);
-		}
-	};
-
-	controller.handle(FactorioVersionEvent, async (event: FactorioVersionEvent, src: lib.Address) => {
-		versions.set(src.id, event.version);
-		benchFailed.delete(src.id); // a new session: a failed benchmark may run again
+	// Capacity amendment C8: the owner clears one pair's mark, or all of a host's (a host since removed, too).
+	controller.handle(ClearMarksRequest, async (request: ClearMarksRequest) => {
+		const cleared = clearMarks(state.marks, request.hostId, request.instanceId);
+		await persist();
+		lifecycle(logger, "balancer.mark", "cleared", {
+			host: request.hostId, instance: request.instanceId ?? null, cleared,
+		});
+		return { cleared };
 	});
 
 	controller.handle(HostMemoryEvent, async (event: HostMemoryEvent, src: lib.Address) => {
 		readings.set(src.id, { capacity: event.capacity, available: event.available, at: Date.now() });
+		if (event.cores !== undefined) {
+			cores.set(src.id, event.cores);
+		}
 		if (limits.get(src.id) !== event.limitPct) {
 			limits.set(src.id, event.limitPct);
 			lifecycle(logger, "balancer.memory", "limit", { host: src.id, limit_pct: event.limitPct }); // MR18, K3
 		}
-	});
-
-	// §5.7's "benchmark now": it runs whatever the host carries (the operator chose), and answers once it has started.
-	controller.handle(BenchmarkRequest, async (request: BenchmarkRequest) => {
-		if (!port.hostConnected(request.hostId)) {
-			throw new lib.UnavailableError(`host ${request.hostId} is not connected`);
-		}
-		if (benchmarking.has(request.hostId)) {
-			throw new lib.ConflictError(`host ${request.hostId} is running its benchmark already`);
-		}
-		benchmarking.add(request.hostId); // claimed before any await, so no second run can start meanwhile
-		try {
-			if (!await reference()) {
-				throw new lib.NotFoundError(
-					"no reference save yet: set balancer.reference_save, or wait until a tile is busy",
-				);
-			}
-		} catch (err) {
-			benchmarking.delete(request.hostId);
-			throw err;
-		}
-		void runBenchmark(request.hostId, true);
 	});
 
 	controller.handle(StatusRequest, async (): Promise<Status> => {
@@ -494,12 +396,9 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 				name: h.name,
 				connected: h.connected,
 				goneSinceMs: gone.has(h.id) ? wallOf(gone.get(h.id)!) : null,
-				speed: speedOf(h.id),
-				slots: slotsOf(h.id),
-				learned: state.hosts[h.id]?.learned !== undefined,
-				busy: busyOn(h.id),
+				cores: cores.get(h.id) ?? null,
+				cap: capOf(h.id),
 				draining: state.draining.includes(h.id),
-				benchmarking: benchmarking.has(h.id),
 				usedPct: usedPct(f, h.id),
 				limitPct: limitPct(f, h.id),
 				room: room(f, h.id, null),
@@ -511,12 +410,18 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 				status: i.status,
 				ups: telemetry.last(i.id)?.ups ?? null,
 				ms: telemetry.meanMs(i.id) ?? null,
+				mainMs: telemetry.meanMs(i.id, "mainMs") ?? null,
 				players: players(i.id),
 				// N2: pulledAt while mtime is 0
 				copyMtimeMs: store.copy(i.id)?.mtimeMs || store.copy(i.id)?.pulledAt || null,
 				need: need(f.figures, i.id),
 			})),
 			moves: state.moves,
+			marks: Object.entries(state.marks).map(([key, mark]) => {
+				const [instanceId, hostId] = key.split(":").map(Number);
+				return { instanceId, hostId, mark };
+			}),
+			reserve: state.reserve ?? null,
 		};
 	});
 
@@ -554,6 +459,9 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 		if (inst.status === "deleted") { // C45
 			forget(state.wasRunning, [inst.id]);
 			delete state.memory[inst.id]; // MR6: a gone tile's peak no longer sets the no-figure estimate
+			for (const key of Object.keys(state.marks).filter(k => k.startsWith(`${inst.id}:`))) {
+				delete state.marks[key]; // C8: no expiry would clear them
+			}
 			await store.drop(inst.id);
 		} else if (inst.status === "unknown" && (prev === "running" || prev === "starting") && i === -1) {
 			state.wasRunning.push(inst.id);
@@ -583,10 +491,14 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 			const fields = { op: "balancer.failover", phase: "no_copy", instance: id };
 			warn(`no_copy:${id}`, "balancer.failover no_copy: no stored copy, so it stays on its gone host", fields);
 		}
-		return move.map((f): Add => ({
+		// A move that failed after its assign left the tile stopped on its target: try its steps 4-6 there again.
+		const again = stranded(tiles(), state.moves, now, RETRY_FAILED_MS, id => moves.moving(id), port.hasCopy);
+		const add = (f: { instanceId: number; from: number; to?: number }): Add => ({
 			instanceId: f.instanceId, from: f.from, reason: "failover",
 			wasRunning: wasRunningBefore(f.instanceId, state.wasRunning, state.moves),
-		}));
+			...f.to === undefined ? {} : { to: f.to },
+		});
+		return [...move.map(add), ...again.map(add)];
 	};
 
 	/** What the decider reads (§4.3 unit 3): the cluster as it is now, `f` its memory; the pass sets memoryHigh. */
@@ -596,21 +508,27 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 		tiles: tiles().map(t => ({ ...t, players: players(t.id), hasCopy: port.hasCopy(t.id) })),
 		moves: state.moves,
 		draining: state.draining,
-		benchmarking,
 		telemetry,
 		floor: config.get("balancer.ups_floor"),
-		speed: speedOf,
-		busyMs: config.get("balancer.busy_tile_ms"),
 		lagMs: config.get("balancer.lag_minutes") * 60_000,
 		checkMs: config.get("balancer.after_check_minutes") * 60_000,
 		fits: (id, h) => noRoom(f, id, h) === undefined,
 		memoryHigh: [],
 		figure: id => state.memory[id],
+		marked: (id, h) => `${id}:${h}` in state.marks,
+		bad: (id, h) => (state.bad[`${id}:${h}`] ?? 0) > f.now,
+		short: (id, h) => short(f, id, h),
+		reserve: state.reserve,
 	});
-	/** §5.6: record an after-check; a failed one marks its pair bad and lowers its host's slots. Logged either way. */
+	/**
+	 * §5.6: record an after-check; a failed one marks its pair bad and may cap its host (C3), and the move may mark
+	 * its origin or its target for cause (C8). Logged either way.
+	 */
 	const judge = (m: Move, check: Check) => {
 		const badMs = config.get("balancer.bad_pair_hours") * 3_600_000;
-		const learned = applyCheck(m, check, state, Date.now(), badMs, config.get("balancer.ups_floor"));
+		const floor = config.get("balancer.ups_floor");
+		const cap = applyCheck(m, check, state, Date.now(), badMs, floor);
+		const mark = markOf(m, check, floor);
 		let outcome = "skipped";
 		if (check.ok !== null) {
 			outcome = check.ok ? "passed" : "failed";
@@ -618,7 +536,8 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 		lifecycle(logger, "balancer.check", outcome, {
 			move: m.id, instance: m.instanceId, host: m.to, reason: m.reason, ups: check.ups, ms: check.ms,
 			others_min_ups: check.othersMinUps, predicted_ms: m.preflight?.msPerTick ?? null,
-			...(learned === undefined ? {} : { learned_slots: learned }),
+			...(cap === undefined ? {} : { cap }),
+			...(mark === undefined ? {} : { marked_host: mark.host, mark: mark.reason }),
 		}, check.ok === false ? "warn" : "info");
 		void persist();
 	};
@@ -640,23 +559,39 @@ export default async function loadControllerPlugin(context: ControllerPluginCont
 		// runs either way.
 		const enabled = config.get("balancer.enabled");
 		const d = decide(v, enabled ? failover() : [], enabled);
+		if (d.release && state.reserve) { // capacity amendment C7: given up (step 5), arrived, or the pass was taken
+			const { instanceId, host } = state.reserve;
+			if (d.release === "bad") {
+				state.bad[`${instanceId}:${host}`] = f.now + config.get("balancer.bad_pair_hours") * 3_600_000;
+			}
+			delete state.reserve;
+			lifecycle(logger, "balancer.room", d.release === "bad" ? "gave_up" : "cleared", {
+				instance: instanceId, host, rule: d.rule,
+			}, d.release === "bad" ? "warn" : "info");
+			void persist();
+		}
 		for (const a of d.add) {
 			moves.add(a);
 		}
 		for (const b of d.beyond) {
-			if (b.instance === null) {
+			if (b.rule === "memory") {
 				const fields = {
 					op: "balancer.memory", phase: "no_move", host: b.host, used_pct: usedPct(f, b.host),
 					limit_pct: limitPct(f, b.host),
 				};
 				const text = "balancer.memory no_move: over its memory limit, and no empty tile fits elsewhere";
 				warn(`no_move:${b.host}`, text, fields);
+			} else if (b.instance === null) { // C8
+				const fields = { op: "balancer.overload", phase: "beyond", host: b.host, instance: null };
+				const text = "balancer.overload beyond: a tile lags on the host, and no empty tile has a host to go to";
+				warn(`beyond:host:${b.host}`, text, fields);
 			} else {
 				const fields = { op: "balancer.overload", phase: "beyond", host: b.host, instance: b.instance };
-				warn(`beyond:${b.instance}`, "balancer.overload beyond: it lags as its host's only busy tile", fields);
+				const text = "balancer.overload beyond: its host's only lagging tile has no other open host to go to " +
+					"(no room, marked or a bad pair)";
+				warn(`beyond:${b.instance}`, text, fields);
 			}
 		}
-		benchmarks(v); // P4: the join benchmark runs whatever balancer.enabled says
 		moves.pump();
 		if (figuresRose) { // MR5: one write a pass at most
 			figuresRose = false;

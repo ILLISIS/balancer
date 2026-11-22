@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { adoptOrphans, failovers, forget, goneHosts, wasRunningBefore } from "../../failover.js";
+import { adoptOrphans, failovers, forget, goneHosts, stranded, wasRunningBefore } from "../../failover.js";
 import type { Move } from "../../contracts.js";
 
 test("a host is gone once it has been away for the grace and its session is closed (§5.3, spike 32)", () => {
@@ -58,4 +58,29 @@ test("an unassigned tile whose latest move is a failed failover counts as on tha
 	const adopted = adoptOrphans(tiles, moves);
 	assert.deepEqual(adopted.map(t => t.host), [2, null, null, 3]);
 	assert.deepEqual(failovers([2], adopted, () => false, () => true).move, [{ instanceId: 10, from: 2 }]);
+});
+
+test("a tile left stopped on the target of a move that failed after its assign is tried there again (issue 4)", () => {
+	const mv = (instanceId: number, step: string, to: number | null, back = false, endedAt = 0) => (
+		{ instanceId, reason: "failover", step, to, back, endedAt } as unknown as Move
+	);
+	const tile = (id: number, host: number | null, status = "stopped") => ({ id, host, status });
+	const tiles = [
+		tile(10, 2), tile(11, 2), tile(12, 1), tile(13, 2), tile(14, 2, "running"), tile(15, 2), tile(16, 2),
+		tile(17, null),
+	];
+	const moves = [
+		mv(10, "failed", 2), // stranded: assigned to 2, push failed, no way back
+		mv(11, "failed", 2, false, 500_000), // failed 100 s ago: not yet
+		mv(12, "failed", 2), // the tile is not on the target: it never got there
+		mv(13, "failed", 2, true), // went back, so it is not on the move's first target
+		mv(14, "failed", 2), // running: nothing to redo
+		mv(15, "failed", 2), mv(15, "done", 2), // a later move finished
+		mv(16, "failed", 2), // has no stored copy
+		mv(17, "failed", null),
+	];
+	const found = stranded(tiles, moves, 600_000, 600_000, id => id === 99, id => id !== 16);
+	assert.deepEqual(found, [{ instanceId: 10, from: 2, to: 2 }]);
+	const rest = stranded(tiles, moves, 600_000, 600_000, id => id === 10, () => true); // 10 is moving now
+	assert.deepEqual(rest.map(f => f.instanceId), [16]);
 });

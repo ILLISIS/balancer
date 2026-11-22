@@ -3,11 +3,12 @@ import { Button, Select, message, Space, Switch, Table, type TableColumnsType } 
 import {
 	ControlContext, PageHeader, PageLayout, notifyErrorHandler, useAccount, type WebPluginContext,
 } from "@clusterio/web_ui";
-import { BenchmarkRequest, DrainRequest, MoveRequest, StatusRequest, type Status } from "../contracts.js";
+import { ClearMarksRequest, DrainRequest, MARK_TEXT, MoveRequest, StatusRequest, type Status } from "../contracts.js";
 
 type Host = Status["hosts"][number];
 type Tile = Status["tiles"][number];
 type Move = Status["moves"][number];
+type Marked = Status["marks"][number];
 
 /** The page reloads the status this often (R17). */
 const REFRESH_MS = 10_000;
@@ -22,6 +23,11 @@ function memory(h: Host): string {
 		: `${h.usedPct.toFixed(0)}% of ${h.limitPct}%; room ${gb(h.room)}`;
 }
 
+/** Capacity amendment C3: the tiles a capped host carries at most, and until when. */
+function cap(h: Host): string {
+	return h.cap === null ? "-" : `capped at ${h.cap.tiles} until ${new Date(h.cap.until).toTimeString().slice(0, 5)}`;
+}
+
 /** A move's outcome: its step, with its error; a finished way back shows why it came back (C13, C30). */
 function result(m: Move): string {
 	if (m.back && m.step === "done") {
@@ -30,7 +36,7 @@ function result(m: Move): string {
 	return m.error === null ? m.step : `${m.step}: ${m.error}`;
 }
 
-/** The after-check (§5.6): its verdict, T's UPS and ms per tick on the target, and its neighbours' lowest UPS. */
+/** The after-check (§5.6): its verdict, T's UPS and ms per tick on the target, and its neighbours' lowest mean UPS. */
 function check(m: Move): string {
 	const c = m.check;
 	if (c === null) {
@@ -44,9 +50,10 @@ function check(m: Move): string {
 }
 
 /**
- * §4.4: the hosts (connected or gone, speed, slots, busy tiles, memory, the drain toggle, "benchmark now"), the
- * tiles (host, UPS, CPU ms per tick, memory need, players, the save copy's age, and a Move control), and the moves:
- * in progress and the ledger.
+ * §4.4: the hosts (connected or gone, cores, cap, tiles, memory, the drain toggle), the tiles (host, UPS, CPU ms per
+ * tick on the main thread and over all threads, memory need, players, the save copy's age, and a Move control), the
+ * marked pairs with a Clear control each and one per host (capacity amendment C8), and the moves: in progress and the
+ * ledger.
  */
 function BalancerPage() {
 	const control = useContext(ControlContext);
@@ -75,14 +82,17 @@ function BalancerPage() {
 	function drain(h: Host, on: boolean) {
 		control.send(new DrainRequest(h.id, on)).then(load).catch(notifyErrorHandler("The drain toggle failed"));
 	}
-	function benchmark(h: Host) {
-		control.send(new BenchmarkRequest(h.id)).then(load).catch(notifyErrorHandler("The benchmark was refused"));
+
+	function unmark(hostId: number, instanceId?: number) {
+		control.send(new ClearMarksRequest(hostId, instanceId)).then(load)
+			.catch(notifyErrorHandler("Clearing the marks failed"));
 	}
 
 	const now = Date.now();
 	const hosts = status?.hosts ?? [];
 	const tiles = status?.tiles ?? [];
 	const moves = status?.moves ?? [];
+	const marks = status?.marks ?? [];
 	const hostName = (id: number | null) => (id === null ? "-" : hosts.find(h => h.id === id)?.name ?? String(id));
 	const tileName = (id: number) => tiles.find(t => t.id === id)?.name ?? String(id);
 	const tileCount = (h: Host) => tiles.filter(t => t.host === h.id).length;
@@ -106,19 +116,22 @@ function BalancerPage() {
 			columns={[
 				{ title: "Host", key: "name", render: (_, h) => h.name },
 				{ title: "State", key: "state", render: (_, h) => (h.connected ? "connected" : "gone") },
-				{
-					title: "Speed (ms/tick)",
-					key: "speed",
-					render: (_, h) => (h.speed === null ? "unbenchmarked" : h.speed.toFixed(2)),
-				},
-				{
-					title: "Slots",
-					key: "slots",
-					render: (_, h) => (h.slots === null ? "-" : `${h.slots}${h.learned ? " (learned)" : ""}`),
-				},
-				{ title: "Busy tiles", key: "busy", render: (_, h) => h.busy },
+				{ title: "Cores", key: "cores", render: (_, h) => h.cores ?? "-" },
 				{ title: "Tiles", key: "tiles", render: (_, h) => tileCount(h) },
+				{ title: "Cap", key: "cap", render: (_, h) => cap(h) },
 				{ title: "Memory", key: "memory", render: (_, h) => memory(h) },
+				{
+					title: "Marks",
+					key: "marks",
+					render: (_, h) => <Space>
+						{marks.filter(m => m.hostId === h.id).length}
+						<Button
+							size="small"
+							disabled={!canAct || !marks.some(m => m.hostId === h.id)}
+							onClick={() => unmark(h.id)}
+						>Clear all</Button>
+					</Space>,
+				},
 				{
 					title: "Drain",
 					key: "drain",
@@ -126,16 +139,6 @@ function BalancerPage() {
 						<Switch size="small" checked={h.draining} disabled={!canAct} onChange={on => drain(h, on)} />
 						{h.draining && tileCount(h) === 0 ? "drained" : null}
 					</Space>,
-				},
-				{
-					title: "Benchmark",
-					key: "benchmark",
-					render: (_, h) => <Button
-						size="small"
-						loading={h.benchmarking}
-						disabled={!canAct || !h.connected}
-						onClick={() => benchmark(h)}
-					>Benchmark now</Button>,
 				},
 			]}
 		/>
@@ -150,7 +153,8 @@ function BalancerPage() {
 				{ title: "Host", key: "host", render: (_, t) => hostName(t.host) },
 				{ title: "Status", key: "status", render: (_, t) => t.status },
 				{ title: "UPS", key: "ups", render: (_, t) => fixed(t.ups, 1) },
-				{ title: "ms/tick", key: "ms", render: (_, t) => fixed(t.ms, 2) },
+				{ title: "Main thread (ms/tick)", key: "mainMs", render: (_, t) => fixed(t.mainMs, 2) },
+				{ title: "All threads (ms/tick)", key: "ms", render: (_, t) => fixed(t.ms, 2) },
 				{ title: "Need", key: "need", render: (_, t) => gb(t.need) },
 				{ title: "Players", key: "players", render: (_, t) => t.players },
 				{ title: "Save copy", key: "copy", render: (_, t) => age(t) },
@@ -173,6 +177,31 @@ function BalancerPage() {
 				},
 			]}
 		/>
+		<h3 style={{ marginTop: 16 }}>Marked pairs</h3>
+		<Table<Marked>
+			size="small"
+			pagination={false}
+			dataSource={marks}
+			rowKey={m => `${m.instanceId}:${m.hostId}`}
+			locale={{ emptyText: "No tile is kept off a host" }}
+			columns={[
+				{ title: "Instance", key: "instance", render: (_, m) => tileName(m.instanceId) },
+				{ title: "Not offered to", key: "host", render: (_, m) => hostName(m.hostId) },
+				{ title: "Reason", key: "reason", render: (_, m) => MARK_TEXT[m.mark.reason] },
+				{ title: "Since", key: "since", render: (_, m) => new Date(m.mark.at).toLocaleDateString() },
+				{
+					title: "Clear",
+					key: "clear",
+					render: (_, m) => <Button
+						size="small" disabled={!canAct} onClick={() => unmark(m.hostId, m.instanceId)}
+					>Clear</Button>,
+				},
+			]}
+		/>
+		{status?.reserve ? <p style={{ marginTop: 16 }}>
+			Making room on {hostName(status.reserve.host)} for {tileName(status.reserve.instanceId)} until{" "}
+			{new Date(status.reserve.until).toLocaleTimeString()}.
+		</p> : null}
 		<h3 style={{ marginTop: 16 }}>Moves in progress</h3>
 		<Table<Move>
 			size="small"

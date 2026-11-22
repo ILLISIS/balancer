@@ -16,6 +16,33 @@ export function adoptOrphans<T extends { id: number; host: number | null }>(tile
 }
 
 /**
+ * A move that failed after its assign, with no way back, leaves the tile stopped on its target without its save
+ * there (§5.2 steps 5-6), where no gone host or unassigned tile would bring failover to it. Such a tile (its host is
+ * the latest move's target, which did not go back) is tried again by a failover pinned to that host, once the move
+ * ended `retryMs` ago (plan ruling 18).
+ */
+export function stranded(
+	tiles: { id: number; host: number | null; status: string }[],
+	moves: Move[],
+	now: number,
+	retryMs: number,
+	skip: (instanceId: number) => boolean,
+	hasCopy: (instanceId: number) => boolean,
+): { instanceId: number; from: number; to: number }[] {
+	const found: { instanceId: number; from: number; to: number }[] = [];
+	for (const t of tiles) {
+		const latest = t.host === null ? undefined : moves.filter(m => m.instanceId === t.id).at(-1);
+		if (
+			latest?.step === "failed" && !latest.back && latest.to === t.host && t.status === "stopped"
+			&& now - (latest.endedAt ?? 0) >= retryMs && !skip(t.id) && hasCopy(t.id)
+		) {
+			found.push({ instanceId: t.id, from: t.host!, to: t.host! });
+		}
+	}
+	return found;
+}
+
+/**
  * §5.3: the hosts away for the grace or longer (`gone` and `now` share one monotonic clock, C51). Only hosts whose
  * session the controller has closed: reassigning an
  * instance while its old host's session is still open fails with "Session Closed" (spike 32).
